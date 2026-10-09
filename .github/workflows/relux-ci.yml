@@ -4,6 +4,9 @@
 # Evidence runs: the orchestrator pushes the exact Change Request tree or landing commit to a
 # `ci/**` branch, then dispatches this workflow with that commit's SHA; jobs check out exactly it.
 # Push runs on `ci/relux-ci-selftest/**` only test changes to this workflow itself.
+# Load policy (ivanopcode/codex, hosted runners only): ONE precheck per workflow run. A precheck is the snapshot plus its
+# mutants: lint runs first on the snapshot, and only a green lint starts the test matrix. Mutants run only the small and
+# core lanes, narrowed to their killer tests by `test_filter`. One global concurrency group queues prechecks one at a time.
 name: relux-ci
 run-name: relux-ci ${{ inputs.label || github.ref_name }} @ ${{ inputs.sha || github.sha }}
 
@@ -16,16 +19,24 @@ on:
       label:
         description: Free-form label, e.g. TASK-ID/revN
         required: false
+      mutant_shas:
+        description: Space-separated full commit ids of mutant commits (each a child of `sha`); each runs small+core under test_filter
+        required: false
+        default: ""
+      test_filter:
+        description: nextest filterset narrowing the mutant lanes to their killer tests (required when mutant_shas is set)
+        required: false
+        default: ""
   push:
     branches: ["ci/relux-ci-selftest/**"]
 
 permissions:
   contents: read
 
-# One group per exact commit (dispatch and push alike), so distinct SHAs never cancel each other.
+# One global group: a dispatched precheck waits until the running one finishes (at most one pending; dispatch one at a time).
 concurrency:
-  group: relux-ci-${{ inputs.sha || github.sha }}
-  cancel-in-progress: true
+  group: relux-ci-global
+  cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -40,26 +51,54 @@ env:
   NEXTEST_RETRIES: "2"
 
 jobs:
-  lanes:
-    name: ${{ matrix.lane }}
+  plan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [lint, small, core, app-server]
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          SNAP: ${{ inputs.sha || github.sha }}
+          MUTANTS: ${{ inputs.mutant_shas }}
+          FILTER: ${{ inputs.test_filter }}
+        run: |
+          set -euo pipefail
+          hex='^[0-9a-f]{40}$'
+          [[ "$SNAP" =~ $hex ]] || { echo "::error::sha must be a full 40-hex commit id"; exit 1; }
+          if [ -n "$MUTANTS" ] && [ -z "$FILTER" ]; then echo "::error::mutant_shas requires test_filter"; exit 1; fi
+          {
+            for lane in small core app-server; do jq -n -c --arg sha "$SNAP" --arg lane "$lane" '{name:"snapshot", sha:$sha, lane:$lane, filter:""}'; done
+            n=0
+            for m in $MUTANTS; do
+              [[ "$m" =~ $hex ]] || { echo "::error::bad mutant sha '$m'" >&2; exit 1; }
+              n=$((n+1))
+              for lane in small core; do jq -n -c --arg sha "$m" --arg lane "$lane" --arg f "$FILTER" --arg name "mutant-$n" '{name:$name, sha:$sha, lane:$lane, filter:$f}'; done
+            done
+          } | jq -s -c '{include: .}' > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          jq -r '.include[] | "\(.name) \(.lane) \(.sha)"' matrix.json
+
+  lint:
+    name: lint
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      LANE: lint
+      RUN_SHA: ${{ inputs.sha || github.sha }}
     defaults:
       run:
         working-directory: codex-rs
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.sha || github.sha }}
+          ref: ${{ env.RUN_SHA }}
 
       # Evidence exactness: the dispatch input must be a full commit id, and the job must test exactly it.
       - name: Verify the checked-out commit
         env:
-          WANT_SHA: ${{ inputs.sha || github.sha }}
+          WANT_SHA: ${{ env.RUN_SHA }}
         run: |
           [[ "$WANT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-hex commit id, got '$WANT_SHA'"; exit 1; }
           HEAD_SHA="$(git rev-parse HEAD)"
@@ -95,10 +134,10 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-relux-${{ matrix.lane }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          key: sccache-relux-${{ env.LANE }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
-            sccache-relux-${{ matrix.lane }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
-            sccache-relux-${{ matrix.lane }}-
+            sccache-relux-${{ env.LANE }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            sccache-relux-${{ env.LANE }}-
 
       - uses: ./.github/actions/setup-rusty-v8
         with:
@@ -106,7 +145,7 @@ jobs:
 
       # `just fmt-check` also runs the Python SDK and scripts formatters through uv.
       - name: Install uv
-        if: matrix.lane == 'lint'
+        if: env.LANE == 'lint'
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.3"
@@ -114,7 +153,7 @@ jobs:
       # Any clippy or rustc warning fails the lane, except the upstream-baseline warnings listed here (present at the
       # fork's upstream pin, not introduced by this series; evidence run 36969374494). Workspace-denied lints fail as errors.
       - name: Lint (fmt + clippy)
-        if: matrix.lane == 'lint'
+        if: env.LANE == 'lint'
         env:
           KNOWN_WARNINGS: |
             core/src/tools/registry.rs: warning: unused import: `crate::tools::context::ToolCallSource`
@@ -135,11 +174,11 @@ jobs:
           fi
 
       - name: Small crates tests
-        if: matrix.lane == 'small'
+        if: env.LANE == 'small'
         run: INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-tools -p codex-goal-extension -p codex-extension-api -p codex-rollout-trace -p codex-queue-extension
 
       - name: Helper binaries for integration tests
-        if: matrix.lane == 'core' || matrix.lane == 'app-server'
+        if: env.LANE == 'core' || env.LANE == 'app-server'
         run: >
           cargo build
           -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server
@@ -154,7 +193,7 @@ jobs:
       # ("unreadable glob" under the test's temp dir). Deterministic 3/3 on relux/main in runs 36959471910
       # and 36959934198; the same tests are quarantined on the local gate for a host zsh difference.
       - name: codex-core tests
-        if: matrix.lane == 'core'
+        if: env.LANE == 'core'
         run: >
           INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-core -E 'not (
           test(=suite::skill_approval::shell_zsh_fork_skill_scripts_ignore_declared_permissions) |
@@ -162,7 +201,7 @@ jobs:
           test(=suite::unified_exec_zsh_fork_approvals::unified_exec_zsh_fork_parent_approval_preserves_denied_reads))'
 
       - name: codex-app-server tests
-        if: matrix.lane == 'app-server'
+        if: env.LANE == 'app-server'
         run: INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-app-server
 
       - name: Save sccache cache
@@ -171,7 +210,156 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-relux-${{ matrix.lane }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          key: sccache-relux-${{ env.LANE }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  tests:
+    name: ${{ matrix.name }} ${{ matrix.lane }}
+    needs: [plan, lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      LANE: ${{ matrix.lane }}
+      RUN_SHA: ${{ matrix.sha }}
+      TEST_FILTER: ${{ matrix.filter }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.RUN_SHA }}
+
+      # Evidence exactness: the dispatch input must be a full commit id, and the job must test exactly it.
+      - name: Verify the checked-out commit
+        env:
+          WANT_SHA: ${{ env.RUN_SHA }}
+        run: |
+          [[ "$WANT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-hex commit id, got '$WANT_SHA'"; exit 1; }
+          HEAD_SHA="$(git rev-parse HEAD)"
+          [ "$HEAD_SHA" = "$WANT_SHA" ] || { echo "::error::checked out $HEAD_SHA, expected $WANT_SHA"; exit 1; }
+
+      - name: Free runner disk
+        working-directory: .
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Linux build dependencies
+        working-directory: .
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential pkg-config libcap-dev libasound2-dev bubblewrap
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: clippy, rustfmt
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest,sccache
+
+      - name: Configure sccache disk cache
+        run: echo "SCCACHE_DIR=${CI_BUILD_ROOT}/sccache" >> "$GITHUB_ENV"
+
+      - name: Restore sccache cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-relux-${{ env.LANE }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-relux-${{ env.LANE }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            sccache-relux-${{ env.LANE }}-
+
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      # `just fmt-check` also runs the Python SDK and scripts formatters through uv.
+      - name: Install uv
+        if: env.LANE == 'lint'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
+      # Any clippy or rustc warning fails the lane, except the upstream-baseline warnings listed here (present at the
+      # fork's upstream pin, not introduced by this series; evidence run 36969374494). Workspace-denied lints fail as errors.
+      - name: Lint (fmt + clippy)
+        if: env.LANE == 'lint'
+        env:
+          KNOWN_WARNINGS: |
+            core/src/tools/registry.rs: warning: unused import: `crate::tools::context::ToolCallSource`
+            core/tests/suite/openai_file_mcp.rs: warning: unused import: `wiremock::matchers::body_json`
+            core/tests/suite/scenarios.rs: warning: unused import: `codex_protocol::openai_models::ReasoningEffort`
+        run: |
+          just fmt-check
+          set -o pipefail
+          just clippy -p codex-tools -p codex-core -p codex-goal-extension -p codex-extension-api -p codex-app-server -p codex-rollout-trace -p codex-queue-extension --message-format=short --color never 2>&1 | tee "$RUNNER_TEMP/clippy.log"
+          printf '%s\n' "$KNOWN_WARNINGS" | sed '/^$/d' > "$RUNNER_TEMP/known-warnings.txt"
+          sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$RUNNER_TEMP/clippy.log" \
+            | sed -nE 's/^([^ :]+):[0-9]+:[0-9]+: (warning: .*)$/\1: \2/p' | sort -u > "$RUNNER_TEMP/warnings.txt"
+          new_warnings="$(grep -v -x -F -f "$RUNNER_TEMP/known-warnings.txt" "$RUNNER_TEMP/warnings.txt" || true)"
+          echo "clippy warnings: $(wc -l < "$RUNNER_TEMP/warnings.txt") distinct, $(grep -c -x -F -f "$RUNNER_TEMP/known-warnings.txt" "$RUNNER_TEMP/warnings.txt" || true) of them upstream baseline"
+          if [ -n "$new_warnings" ]; then
+            printf '::error::clippy warnings outside the upstream baseline:\n%s\n' "$new_warnings"
+            exit 1
+          fi
+
+      - name: Small crates tests
+        if: env.LANE == 'small'
+        run: |
+          filter=()
+          # A mutant whose killer tests live in the other lane matches nothing here; that must not count as a failure.
+          [ -z "$TEST_FILTER" ] || filter=(-E "$TEST_FILTER" --no-tests=pass)
+          INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-tools -p codex-goal-extension -p codex-extension-api -p codex-rollout-trace -p codex-queue-extension "${filter[@]}"
+
+      - name: Helper binaries for integration tests
+        if: env.LANE == 'core' || env.LANE == 'app-server'
+        run: >
+          cargo build
+          -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server
+          -p codex-shell-escalation --bin codex-execve-wrapper
+          -p codex-app-server --bin codex-app-server --bin codex-app-server-test-notify-capture --bin exec-server
+          -p codex-code-mode-host --bin codex-code-mode-host
+          -p codex-cli --bin codex -p codex-exec --bin codex-exec
+          -p codex-linux-sandbox --bin codex-linux-sandbox
+
+      # Hosted-runner quarantine (environment, not product code): on ubuntu-24.04 runners these zsh-fork
+      # tests fail before running, because the fs sandbox helper refuses to build its bubblewrap command
+      # ("unreadable glob" under the test's temp dir). Deterministic 3/3 on relux/main in runs 36959471910
+      # and 36959934198; the same tests are quarantined on the local gate for a host zsh difference.
+      - name: codex-core tests
+        if: env.LANE == 'core'
+        run: |
+          quarantine='test(=suite::skill_approval::shell_zsh_fork_skill_scripts_ignore_declared_permissions) |
+          test(=suite::unified_exec_zsh_fork_approvals::unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_turn) |
+          test(=suite::unified_exec_zsh_fork_approvals::unified_exec_zsh_fork_parent_approval_preserves_denied_reads)'
+          expr="not ($quarantine)"
+          extra=()
+          [ -z "$TEST_FILTER" ] || { expr="($TEST_FILTER) and not ($quarantine)"; extra=(--no-tests=pass); }
+          INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-core -E "$expr" "${extra[@]}"
+
+      - name: codex-app-server tests
+        if: env.LANE == 'app-server'
+        run: INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-app-server
+
+      - name: Save sccache cache
+        if: always() && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: sccache-relux-${{ env.LANE }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
 
       - name: sccache stats
         if: always()
