@@ -4,7 +4,7 @@
 # Evidence runs: the orchestrator pushes the exact Change Request tree or landing commit to a
 # `ci/**` branch, then dispatches this workflow with that commit's SHA; jobs check out exactly it.
 # Push runs on `ci/relux-ci-selftest/**` only test changes to this workflow itself.
-# Load policy (ivanopcode/codex, hosted runners only): ONE precheck per workflow run. A precheck is the snapshot plus its
+# Load policy (ivanopcode/codex, GitHub-hosted runners only, never self-hosted): ONE precheck per workflow run. A precheck is the snapshot plus its
 # mutants: lint runs first on the snapshot, and only a green lint starts the test matrix. Mutants run only the small and
 # core lanes, narrowed to their killer tests by `test_filter`. One global concurrency group queues prechecks one at a time.
 name: relux-ci
