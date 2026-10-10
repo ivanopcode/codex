@@ -313,6 +313,13 @@ impl GoalAccountingState {
             {
                 self.record_spawn_followup(turn_id);
             }
+            TurnItem::AgentMessage(message)
+                if message.content.iter().any(|content| match content {
+                    AgentMessageContent::Text { text } => text.contains("STATE"),
+                }) =>
+            {
+                self.record_spawn_followup(turn_id);
+            }
             TurnItem::UserMessage(_)
             | TurnItem::FunctionCallOutput(_)
             | TurnItem::HookPrompt(_)
