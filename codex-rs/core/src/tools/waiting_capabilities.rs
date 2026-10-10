@@ -96,14 +96,12 @@ fn find_direct_wait_agent(specs: &[ToolSpec]) -> Option<ToolName> {
         ToolSpec::Freeform(tool) => {
             (tool.name == WAIT_AGENT_TOOL_NAME).then(|| ToolName::plain(tool.name.clone()))
         }
-        ToolSpec::Namespace(namespace) => namespace
-            .tools
-            .iter()
-            .any(|tool| match tool {
+        ToolSpec::Namespace(namespace) => (namespace.name != "multi_agent_v1"
+            && namespace.tools.iter().any(|tool| match tool {
                 ResponsesApiNamespaceTool::Function(tool) => tool.name == WAIT_AGENT_TOOL_NAME,
                 ResponsesApiNamespaceTool::Custom(tool) => tool.name == WAIT_AGENT_TOOL_NAME,
-            })
-            .then(|| ToolName::namespaced(namespace.name.clone(), WAIT_AGENT_TOOL_NAME)),
+            }))
+        .then(|| ToolName::namespaced(namespace.name.clone(), WAIT_AGENT_TOOL_NAME)),
         ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => None,
     })
 }
