@@ -51,12 +51,7 @@ pub(crate) fn derive_waiting_capabilities(
         discovered,
         &ToolName::namespaced(CLOCK_NAMESPACE, SLEEP_TOOL_NAME),
     );
-    let stdin = is_callable(
-        router,
-        &specs,
-        discovered,
-        &ToolName::plain(WRITE_STDIN_TOOL_NAME),
-    );
+    let stdin = router.exposes_tool(&ToolName::plain(WRITE_STDIN_TOOL_NAME));
     let native_wait = find_native_wait_agent(router, &specs, discovered);
     let host_available = AsyncNotificationSupport::read_from(thread_store).is_available();
     let exec_notify = host_available
