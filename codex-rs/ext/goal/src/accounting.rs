@@ -312,6 +312,9 @@ impl GoalAccountingState {
             {
                 self.record_spawn_followup(turn_id);
             }
+            TurnItem::AgentMessage(_) => {
+                self.record_spawn_followup(turn_id);
+            }
             TurnItem::UserMessage(_)
             | TurnItem::FunctionCallOutput(_)
             | TurnItem::HookPrompt(_)
