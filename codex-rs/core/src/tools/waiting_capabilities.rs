@@ -59,8 +59,7 @@ pub(crate) fn derive_waiting_capabilities(
     );
     let native_wait = find_native_wait_agent(router, &specs, discovered);
     let host_available = AsyncNotificationSupport::read_from(thread_store).is_available();
-    let exec_notify = host_available
-        && exec_command_advertises_notify_on_exit(router, &specs, discovered)
+    let exec_notify = exec_command_advertises_notify_on_exit(router, &specs, discovered)
         && stdin
         && is_callable(
             router,
