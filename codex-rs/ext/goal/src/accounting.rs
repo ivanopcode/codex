@@ -2,8 +2,14 @@ use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolName;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::CollabAgentTool;
+use codex_protocol::items::CollabAgentToolCallStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::plan_tool::PlanItemArg;
+use codex_protocol::plan_tool::StepStatus;
+use codex_protocol::protocol::PatchApplyStatus;
+use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::TokenUsage;
 use codex_state::ThreadGoalStatus;
 use std::collections::HashMap;
@@ -34,6 +40,7 @@ struct GoalAccountingInner {
     automatic_goal_turn_id: Option<String>,
     consecutive_empty_turns: u8,
     last_accounted_descendant_token_usage: i64,
+    last_committed_plan: Option<Vec<PlanItemArg>>,
 }
 
 #[derive(Debug)]
@@ -46,6 +53,7 @@ struct GoalTurnAccounting {
     successful_tool: bool,
     empty_final: bool,
     has_activity: bool,
+    state_change_count: u32,
 }
 
 #[derive(Debug)]
@@ -201,6 +209,146 @@ impl GoalAccountingState {
         if turn.has_activity {
             inner.consecutive_empty_turns = 0;
         }
+    }
+
+    /// Records one applied file change for `turn_id`.
+    ///
+    /// Call only after the patch/edit handler has committed the change, as
+    /// evidenced by a `FileChange` item with `Completed` status. Failed,
+    /// declined, or unapplied patches must not call this. Unknown turns are
+    /// ignored. The code-mode `exec` wrapper emits no turn item at all
+    /// (only nested leaves surface), so wrapper success never reaches
+    /// this path.
+    pub(crate) fn record_applied_file_change(&self, turn_id: &str) {
+        let mut inner = self.inner();
+        let Some(turn) = inner.turns.get_mut(turn_id) else {
+            return;
+        };
+        turn.state_change_count = turn.state_change_count.saturating_add(1);
+    }
+
+    /// Records one committed goal mutation for `turn_id`.
+    ///
+    /// Call only after the goal store mutation has committed (create, update,
+    /// or external set/clear). Failed mutations and usage-accounting writes
+    /// must not call this. Unknown turns are ignored.
+    pub(crate) fn record_goal_mutation(&self, turn_id: &str) {
+        let mut inner = self.inner();
+        let Some(turn) = inner.turns.get_mut(turn_id) else {
+            return;
+        };
+        turn.state_change_count = turn.state_change_count.saturating_add(1);
+    }
+
+    /// Records one accepted spawn or follow-up for `turn_id`.
+    ///
+    /// Call only after the agent control plane has accepted the request, as
+    /// evidenced by a completed spawn/send `CollabAgentToolCall` or a
+    /// `Started`/`Interacted` sub-agent activity item. Rejected, failed, or
+    /// wait/close/list/interrupt outcomes must not call this. Unknown turns
+    /// are ignored.
+    pub(crate) fn record_spawn_followup(&self, turn_id: &str) {
+        let mut inner = self.inner();
+        let Some(turn) = inner.turns.get_mut(turn_id) else {
+            return;
+        };
+        turn.state_change_count = turn.state_change_count.saturating_add(1);
+    }
+
+    /// Records an actual plan transition for `turn_id`.
+    ///
+    /// Compares `new_plan` steps against the last committed plan and updates
+    /// the stored plan. Returns true when the steps differ (including the
+    /// first committed plan), false for an identical resubmission. The free
+    /// text `explanation` is never compared, so it cannot trigger an
+    /// observation. The count increments only on a transition with a known
+    /// turn; identical submissions and unknown turns leave counts unchanged.
+    pub(crate) fn record_plan_transition(&self, turn_id: &str, new_plan: &[PlanItemArg]) -> bool {
+        let mut inner = self.inner();
+        let transition = match inner.last_committed_plan.as_deref() {
+            None => true,
+            Some(previous) => !plans_equal(previous, new_plan),
+        };
+        inner.last_committed_plan = Some(new_plan.to_vec());
+        if !transition {
+            return false;
+        }
+        let Some(turn) = inner.turns.get_mut(turn_id) else {
+            return true;
+        };
+        turn.state_change_count = turn.state_change_count.saturating_add(1);
+        true
+    }
+
+    /// Classifies one completed turn item as a state-changing outcome.
+    ///
+    /// Records file-change and spawn/follow-up observations from their
+    /// committing item events. Every other item kind, including command
+    /// execution success, failed or declined outcomes, and agent text, is
+    /// ignored. This never consults `ToolCallOutcome` success.
+    pub(crate) fn record_state_change_for_item(&self, turn_id: &str, item: &TurnItem) {
+        match item {
+            TurnItem::FileChange(item)
+                if matches!(item.status, Some(PatchApplyStatus::Completed)) =>
+            {
+                self.record_applied_file_change(turn_id);
+            }
+            TurnItem::CollabAgentToolCall(item)
+                if item.status == CollabAgentToolCallStatus::Completed
+                    && matches!(
+                        item.tool,
+                        CollabAgentTool::SpawnAgent
+                            | CollabAgentTool::SendInput
+                            | CollabAgentTool::SendMessage
+                            | CollabAgentTool::FollowupTask
+                    ) =>
+            {
+                self.record_spawn_followup(turn_id);
+            }
+            TurnItem::SubAgentActivity(item)
+                if matches!(
+                    item.kind,
+                    SubAgentActivityKind::Started | SubAgentActivityKind::Interacted
+                ) =>
+            {
+                self.record_spawn_followup(turn_id);
+            }
+            TurnItem::UserMessage(_)
+            | TurnItem::FunctionCallOutput(_)
+            | TurnItem::HookPrompt(_)
+            | TurnItem::AgentMessage(_)
+            | TurnItem::Plan(_)
+            | TurnItem::Reasoning(_)
+            | TurnItem::CommandExecution(_)
+            | TurnItem::DynamicToolCall(_)
+            | TurnItem::CollabAgentToolCall(_)
+            | TurnItem::SubAgentActivity(_)
+            | TurnItem::WebSearch(_)
+            | TurnItem::ImageView(_)
+            | TurnItem::Extension(_)
+            | TurnItem::ImageGeneration(_)
+            | TurnItem::EnteredReviewMode(_)
+            | TurnItem::ExitedReviewMode(_)
+            | TurnItem::FileChange(_)
+            | TurnItem::McpToolCall(_)
+            | TurnItem::ContextCompaction(_) => {}
+        }
+    }
+
+    /// Returns how many state-changing outcomes were observed for `turn_id`.
+    ///
+    /// Unknown or finished turns report zero. Observations are transient
+    /// per-turn counts; see [`Self::has_observed_state_change`].
+    pub(crate) fn state_change_count(&self, turn_id: &str) -> u32 {
+        self.inner()
+            .turns
+            .get(turn_id)
+            .map_or(0, |turn| turn.state_change_count)
+    }
+
+    /// Returns whether at least one state-changing outcome was observed.
+    pub(crate) fn has_observed_state_change(&self, turn_id: &str) -> bool {
+        self.state_change_count(turn_id) > 0
     }
 
     pub(crate) fn mark_goal_continuation(&self, turn_id: String) {
@@ -531,6 +679,21 @@ pub(crate) fn goal_token_delta_for_usage(usage: &TokenUsage) -> i64 {
         .saturating_add(usage.output_tokens.max(0))
 }
 
+fn plans_equal(previous: &[PlanItemArg], new: &[PlanItemArg]) -> bool {
+    if previous.len() != new.len() {
+        return false;
+    }
+    previous.iter().zip(new.iter()).all(|(a, b)| {
+        a.step == b.step
+            && matches!(
+                (&a.status, &b.status),
+                (StepStatus::Pending, StepStatus::Pending)
+                    | (StepStatus::InProgress, StepStatus::InProgress)
+                    | (StepStatus::Completed, StepStatus::Completed)
+            )
+    })
+}
+
 impl Default for GoalAccountingInner {
     fn default() -> Self {
         Self {
@@ -543,6 +706,7 @@ impl Default for GoalAccountingInner {
             automatic_goal_turn_id: None,
             consecutive_empty_turns: 0,
             last_accounted_descendant_token_usage: 0,
+            last_committed_plan: None,
         }
     }
 }
@@ -569,6 +733,7 @@ impl GoalTurnAccounting {
             successful_tool: false,
             empty_final: false,
             has_activity: false,
+            state_change_count: 0,
         }
     }
 

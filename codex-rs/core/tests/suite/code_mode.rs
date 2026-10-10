@@ -25,6 +25,7 @@ use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
+use codex_extension_api::TurnLifecycleContributor;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
 use codex_http_client::DestinationPolicy;
@@ -44,6 +45,8 @@ use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::items::CommandExecutionStatus;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
@@ -54,6 +57,7 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::PatchApplyStatus;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
@@ -6840,6 +6844,153 @@ async fn code_mode_can_apply_patch_via_nested_tool() -> Result<()> {
     let file_path = test.cwd_path().join(file_name);
     assert_eq!(fs::read_to_string(&file_path)?, "hello from code_mode\n");
 
+    Ok(())
+}
+
+/// Records every item delivered to turn observers, in delivery order.
+#[derive(Default)]
+struct CompletedItemRecorder {
+    items: Mutex<Vec<TurnItem>>,
+}
+
+impl TurnLifecycleContributor for CompletedItemRecorder {
+    fn on_item_completed<'a>(
+        &'a self,
+        _thread_store: &'a ExtensionData,
+        _turn_store: &'a ExtensionData,
+        item: &'a TurnItem,
+    ) -> ExtensionFuture<'a, ()> {
+        let item = item.clone();
+        Box::pin(async move {
+            self.items
+                .lock()
+                .expect("recorder should not be poisoned")
+                .push(item);
+        })
+    }
+}
+
+async fn run_code_mode_turn_with_item_recorder(
+    server: &MockServer,
+    prompt: &str,
+    code: &str,
+) -> Result<(TestCodex, ResponseMock, Arc<CompletedItemRecorder>)> {
+    let recorder = Arc::new(CompletedItemRecorder::default());
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.turn_lifecycle_contributor(recorder.clone());
+    let builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            let _ = config.features.enable(Feature::ExecutedToolCallMetadata);
+        })
+        .with_extensions(Arc::new(extensions.build()));
+    let (test, second_mock) =
+        run_code_mode_turn_with_builder(server, prompt, code, builder).await?;
+    Ok((test, second_mock, recorder))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_leaf_applied_patch_delivered_exactly_once() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let file_name = "code_mode_leaf_observation.txt";
+    let patch = format!(
+        "*** Begin Patch\n*** Add File: {file_name}\n+hello from code_mode\n*** End Patch\n"
+    );
+    let code = format!("text(await tools.apply_patch({patch:?}));\n");
+
+    let (test, second_mock, recorder) =
+        run_code_mode_turn_with_item_recorder(&server, "use exec to run apply_patch", &code)
+            .await?;
+
+    // The turn finished: the follow-up request carries the exec result.
+    let req = second_mock.single_request();
+    let (_, success) = req
+        .custom_tool_call_output_content_and_success("call-1")
+        .expect("custom tool output should be present");
+    assert_ne!(
+        success,
+        Some(false),
+        "exec apply_patch call failed unexpectedly"
+    );
+    let file_path = test.cwd_path().join(file_name);
+    assert_eq!(fs::read_to_string(&file_path)?, "hello from code_mode\n");
+
+    // Exactly one applied FileChange reaches turn observers. The code-mode
+    // `exec` wrapper itself emits no turn item at all: only nested leaf
+    // tools surface here (apply_patch as FileChange, exec_command as
+    // CommandExecution). The wrapper's output goes to history only, so
+    // there is nothing for goal observations to classify from it.
+    let items = recorder
+        .items
+        .lock()
+        .expect("recorder should not be poisoned");
+    let file_changes: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            TurnItem::FileChange(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(file_changes.len(), 1);
+    assert_eq!(file_changes[0].status, Some(PatchApplyStatus::Completed));
+    let command_executions = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                TurnItem::CommandExecution(item)
+                    if item.status == CommandExecutionStatus::Completed
+            )
+        })
+        .count();
+    assert_eq!(command_executions, 0);
+    assert!(
+        items.iter().all(|item| item.id() != "call-1"),
+        "code-mode exec wrapper must not deliver its own turn item: {items:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_leaf_wrapper_only_delivers_no_file_change() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let code = r#"const out = await tools.exec_command({ cmd: "printf wrapper_only_marker" }); text(out.output);"#;
+
+    let (_test, second_mock, recorder) =
+        run_code_mode_turn_with_item_recorder(&server, "use exec without patching", code).await?;
+
+    let req = second_mock.single_request();
+    let (_, success) = req
+        .custom_tool_call_output_content_and_success("call-1")
+        .expect("custom tool output should be present");
+    assert_ne!(success, Some(false), "exec call failed unexpectedly");
+
+    let items = recorder
+        .items
+        .lock()
+        .expect("recorder should not be poisoned");
+    assert!(
+        items
+            .iter()
+            .all(|item| !matches!(item, TurnItem::FileChange(_))),
+        "wrapper-only exec must not deliver a FileChange: {items:?}"
+    );
+    // The nested exec_command leaf (not the wrapper) delivers exactly one
+    // CommandExecution; the wrapper itself emits no turn item.
+    let command_executions = items
+        .iter()
+        .filter(|item| matches!(item, TurnItem::CommandExecution(_)))
+        .count();
+    assert_eq!(command_executions, 1);
+    assert!(
+        items.iter().all(|item| item.id() != "call-1"),
+        "code-mode exec wrapper must not deliver its own turn item: {items:?}"
+    );
     Ok(())
 }
 
