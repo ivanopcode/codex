@@ -7,6 +7,8 @@ mod steering;
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
+use codex_extension_api::ToolName;
+use codex_extension_api::WaitingCapabilities;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -65,5 +67,27 @@ fn test_goal(objective: &str) -> ThreadGoal {
         time_used_seconds: 0,
         created_at: 0,
         updated_at: 0,
+    }
+}
+
+#[test]
+fn waiting_capabilities_reach_goal_renderer_without_prompt_text() {
+    // The snapshot leaf threads the snapshot through to the goal contributor
+    // without rendering guidance; the continuation-guidance leaf owns this
+    // renderer's evolution.
+    for capabilities in [
+        WaitingCapabilities::none(),
+        WaitingCapabilities {
+            sleep: true,
+            stdin: true,
+            native_wait: Some(ToolName::namespaced("collaboration", "wait_agent")),
+            exec_notify: true,
+            native_mail_wait: true,
+        },
+    ] {
+        assert_eq!(
+            steering::waiting_capability_fragments(&capabilities),
+            Vec::new(),
+        );
     }
 }
