@@ -632,6 +632,20 @@ async fn emit_patch_end(
             ctx.turn,
             TurnItem::FileChange(FileChangeItem {
                 id: ctx.call_id.to_string(),
+                changes: changes.clone(),
+                status: Some(status.clone()),
+                auto_approved: None,
+                stdout: Some(stdout.clone()),
+                stderr: Some(stderr.clone()),
+            }),
+        )
+        .await;
+
+    ctx.session
+        .emit_turn_item_completed(
+            ctx.turn,
+            TurnItem::FileChange(FileChangeItem {
+                id: ctx.call_id.to_string(),
                 changes,
                 status: Some(status),
                 auto_approved: None,
