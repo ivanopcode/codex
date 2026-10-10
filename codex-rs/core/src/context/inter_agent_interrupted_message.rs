@@ -74,7 +74,7 @@ impl ContextualUserFragment for InterAgentInterruptedMessage {
     fn body(&self) -> String {
         let task_name = truncate_path(&self.task_name);
         let sender = truncate_path(&self.sender);
-        format!("{BODY_PREFIX}{task_name}{BODY_MIDDLE}{sender}{BODY_SUFFIX}")
+        format!("Message Type: FINAL_ANSWER\nTask name: {task_name}\nSender: {sender}\nPayload:\nAgent completed successfully.")
     }
 }
 
