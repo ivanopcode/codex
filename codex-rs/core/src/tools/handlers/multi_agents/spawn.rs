@@ -175,21 +175,13 @@ async fn handle_spawn_agent(
     let agents_states = new_thread_id
         .map(|thread_id| [(thread_id, status.clone())].into_iter().collect())
         .unwrap_or_default();
-    // Report the spawn result, not child liveness: an accepted spawn is
-    // Completed even if the child has already errored, and a refused spawn
-    // is Failed. Liveness stays in agents_states for display.
-    let delivery_status = if result.is_ok() {
-        CollabAgentToolCallStatus::Completed
-    } else {
-        CollabAgentToolCallStatus::Failed
-    };
     session
         .emit_turn_item_completed(
             turn,
             TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                 id: call_id,
                 tool: CollabAgentTool::SpawnAgent,
-                status: delivery_status,
+                status: collab_tool_call_status(&status, new_thread_id),
                 sender_thread_id: session.thread_id,
                 receiver_thread_ids,
                 receiver_agents,
