@@ -439,11 +439,6 @@ impl GoalRuntimeHandle {
         self.inner.analytics.cleared(&goal);
         self.inner.background_wait.note_clear();
         if committed.is_none() {
-            if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
-                self.inner
-                    .accounting_state
-                    .record_goal_mutation(turn_id.as_str());
-            }
             self.inner.accounting_state.clear_active_goal();
         }
         Ok(())
