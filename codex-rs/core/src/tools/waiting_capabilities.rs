@@ -37,10 +37,7 @@ pub(crate) fn derive_waiting_capabilities(
     thread_store: &ExtensionData,
 ) -> WaitingCapabilities {
     let specs = router.model_visible_specs();
-    let sleep = is_directly_visible(
-        &specs,
-        &ToolName::namespaced(CLOCK_NAMESPACE, SLEEP_TOOL_NAME),
-    );
+    let sleep = router.exposes_tool(&ToolName::namespaced(CLOCK_NAMESPACE, SLEEP_TOOL_NAME));
     let stdin = is_directly_visible(&specs, &ToolName::plain(WRITE_STDIN_TOOL_NAME));
     let native_wait = find_direct_wait_agent(&specs);
     let host_available = AsyncNotificationSupport::read_from(thread_store).is_available();
