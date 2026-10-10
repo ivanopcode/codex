@@ -61,13 +61,7 @@ pub(crate) fn derive_waiting_capabilities(
     let host_available = AsyncNotificationSupport::read_from(thread_store).is_available();
     let exec_notify = host_available
         && exec_command_advertises_notify_on_exit(router, &specs, discovered)
-        && stdin
-        && is_callable(
-            router,
-            &specs,
-            discovered,
-            &ToolName::plain(EXEC_NOTIFICATION_TOOL_NAME),
-        );
+        && stdin;
     let native_mail_wait =
         host_available && thread_store.get::<GoalBackgroundWaitAdmission>().is_some();
     WaitingCapabilities {
