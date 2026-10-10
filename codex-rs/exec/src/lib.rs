@@ -2273,8 +2273,7 @@ fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> anyhow::Result<Optio
         match behavior {
             StdinPromptBehavior::OptionalAppend => Ok(None),
             StdinPromptBehavior::RequiredIfPiped | StdinPromptBehavior::Forced => {
-                eprintln!("No prompt provided via stdin.");
-                return Err(SilentExit::failure().into());
+                anyhow::bail!("No prompt provided via stdin.");
             }
         }
     } else {
