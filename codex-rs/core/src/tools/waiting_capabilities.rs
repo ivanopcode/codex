@@ -90,20 +90,13 @@ fn is_directly_visible(specs: &[ToolSpec], name: &ToolName) -> bool {
 /// several ever appear, the first in model-visible order wins.
 fn find_direct_wait_agent(specs: &[ToolSpec]) -> Option<ToolName> {
     specs.iter().find_map(|spec| match spec {
-        ToolSpec::Function(tool) => {
-            (tool.name == WAIT_AGENT_TOOL_NAME).then(|| ToolName::plain(tool.name.clone()))
-        }
-        ToolSpec::Freeform(tool) => {
-            (tool.name == WAIT_AGENT_TOOL_NAME).then(|| ToolName::plain(tool.name.clone()))
-        }
-        ToolSpec::Namespace(namespace) => namespace
-            .tools
-            .iter()
-            .any(|tool| match tool {
+        ToolSpec::Function(_) | ToolSpec::Freeform(_) => None,
+        ToolSpec::Namespace(namespace) => (namespace.name == "multi_agent_v1"
+            && namespace.tools.iter().any(|tool| match tool {
                 ResponsesApiNamespaceTool::Function(tool) => tool.name == WAIT_AGENT_TOOL_NAME,
                 ResponsesApiNamespaceTool::Custom(tool) => tool.name == WAIT_AGENT_TOOL_NAME,
-            })
-            .then(|| ToolName::namespaced(namespace.name.clone(), WAIT_AGENT_TOOL_NAME)),
+            }))
+        .then(|| ToolName::namespaced(namespace.name.clone(), WAIT_AGENT_TOOL_NAME)),
         ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => None,
     })
 }
