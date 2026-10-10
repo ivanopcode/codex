@@ -553,6 +553,11 @@ where
                 input.tool_name,
                 input.outcome,
             );
+            if matches!(input.outcome, ToolCallOutcome::Completed { success: true }) {
+                runtime
+                    .accounting_state()
+                    .record_goal_mutation(input.turn_id);
+            }
             if input.tool_name.is_default_namespace()
                 && input.tool_name.name == CREATE_GOAL_TOOL_NAME
                 && matches!(input.outcome, ToolCallOutcome::Completed { success: true })
