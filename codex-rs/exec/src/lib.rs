@@ -2274,7 +2274,7 @@ fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> anyhow::Result<Optio
             StdinPromptBehavior::OptionalAppend => Ok(None),
             StdinPromptBehavior::RequiredIfPiped | StdinPromptBehavior::Forced => {
                 eprintln!("No prompt provided via stdin.");
-                return Err(SilentExit::failure().into());
+                std::process::exit(1);
             }
         }
     } else {
