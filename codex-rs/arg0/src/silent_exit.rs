@@ -69,7 +69,8 @@ pub fn exit_result_from_result(
             if let Some(code) = err.downcast_ref::<SilentExit>().map(SilentExit::code) {
                 Ok(std::process::ExitCode::from(code))
             } else {
-                Err(err)
+                eprintln!("Error: {err:?}");
+                Ok(std::process::ExitCode::FAILURE)
             }
         }
     }
