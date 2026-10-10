@@ -57,6 +57,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_arg0::Arg0DispatchPaths;
+use codex_arg0::SilentExit;
 use codex_cloud_config::cloud_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
@@ -332,12 +333,15 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
 
     // Parse `-c` overrides from the CLI.
+    //
+    // Print the diagnostic and return a silent exit so per-process
+    // temporary-directory guards (arg0 aliases, subprocess transports) are
+    // dropped and removed, without changing the exact stderr bytes.
     let cli_kv_overrides = match config_overrides.parse_overrides() {
         Ok(v) => v,
-        #[allow(clippy::print_stderr)]
         Err(e) => {
             eprintln!("Error parsing -c overrides: {e}");
-            std::process::exit(1);
+            return Err(SilentExit::failure().into());
         }
     };
 
@@ -350,12 +354,11 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
 
     // we load config.toml here to determine project state.
-    #[allow(clippy::print_stderr)]
     let codex_home = match find_codex_home() {
         Ok(codex_home) => codex_home,
         Err(err) => {
             eprintln!("Error finding codex home: {err}");
-            std::process::exit(1);
+            return Err(SilentExit::failure().into());
         }
     };
     let user_config_path = config_profile_v2
@@ -379,7 +382,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let managed_worktree = if worktree {
         let embedded_network_policy =
             codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
-        let gate_bootstrap = load_bootstrap_config_or_exit(
+        let gate_bootstrap = load_bootstrap_config(
             &codex_home,
             /*cwd*/ None,
             cli_kv_overrides.clone(),
@@ -387,7 +390,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             strict_config,
             CloudConfigBundleLoader::default(),
         )
-        .await;
+        .await?;
         let gate_cloud_config = cloud_config_bundle_loader_for_storage(
             embedded_network_policy
                 .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &gate_bootstrap)?),
@@ -450,7 +453,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             }
         }
         // Allocation belongs to the host, not this session's project, profile, or overrides.
-        let host_config = load_bootstrap_config_or_exit(
+        let host_config = load_bootstrap_config(
             &codex_home,
             /*cwd*/ None,
             Vec::new(),
@@ -458,7 +461,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             strict_config,
             CloudConfigBundleLoader::default(),
         )
-        .await;
+        .await?;
         let settings =
             WorktreeSettings::for_cli(&codex_home, host_config.config_toml.desktop.as_ref())?;
         let manager = WorktreeManager::new(settings);
@@ -478,7 +481,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     };
     let embedded_network_policy =
         codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
-    let bootstrap_config = load_bootstrap_config_or_exit(
+    let bootstrap_config = load_bootstrap_config(
         &codex_home,
         Some(&config_cwd),
         cli_kv_overrides.clone(),
@@ -486,7 +489,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         strict_config,
         CloudConfigBundleLoader::default(),
     )
-    .await;
+    .await?;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
     let bootstrap_auth_config = embedded_network_policy
         .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &bootstrap_config)?);
@@ -529,7 +532,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             // The first load intentionally skips cloud config so we can read
             // auth/base-url settings needed to fetch the bundle. If OSS mode
             // needs a default provider from config, reload with the bundle.
-            bootstrap_config_with_cloud_config = load_bootstrap_config_or_exit(
+            bootstrap_config_with_cloud_config = load_bootstrap_config(
                 &codex_home,
                 Some(&config_cwd),
                 cli_kv_overrides.clone(),
@@ -537,7 +540,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
                 strict_config,
                 cloud_config_bundle.clone(),
             )
-            .await;
+            .await?;
             &bootstrap_config_with_cloud_config.config_toml
         } else {
             bootstrap_config_toml
@@ -620,7 +623,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .any(|(key, _)| key == "approvals_reviewer")
         .then(|| config.approvals_reviewer.into());
 
-    #[allow(clippy::print_stderr)]
     match check_execpolicy_for_warnings(&config.config_layer_stack).await {
         Ok(None) => {}
         Ok(Some(err)) | Err(err) => {
@@ -628,7 +630,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
                 "Error loading rules:\n{}",
                 format_exec_policy_error_with_source(&err)
             );
-            std::process::exit(1);
+            return Err(SilentExit::failure().into());
         }
     }
 
@@ -638,7 +640,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         && let Err(err) = enforce_login_restrictions(&config.auth_config()).await
     {
         eprintln!("{err}");
-        std::process::exit(1);
+        return Err(SilentExit::failure().into());
     }
 
     let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -790,15 +792,14 @@ where
     }
 }
 
-#[allow(clippy::print_stderr)]
-async fn load_bootstrap_config_or_exit(
+async fn load_bootstrap_config(
     codex_home: &Path,
     cwd: Option<&AbsolutePathBuf>,
     cli_kv_overrides: Vec<(String, codex_config::TomlValue)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
     cloud_config_bundle: CloudConfigBundleLoader,
-) -> ConfigTomlLoadResult {
+) -> anyhow::Result<ConfigTomlLoadResult> {
     match load_config_toml_with_layer_stack(
         codex_home,
         cwd,
@@ -811,7 +812,7 @@ async fn load_bootstrap_config_or_exit(
     )
     .await
     {
-        Ok(config_toml) => config_toml,
+        Ok(config_toml) => Ok(config_toml),
         Err(err) => {
             let config_error = err
                 .get_ref()
@@ -825,7 +826,7 @@ async fn load_bootstrap_config_or_exit(
             } else {
                 eprintln!("Error loading config.toml: {err}");
             }
-            std::process::exit(1);
+            Err(SilentExit::failure().into())
         }
     }
 }
@@ -899,7 +900,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     }
                 })
                 .or(root_prompt);
-            let prompt_text = resolve_prompt(prompt_arg);
+            let prompt_text = resolve_prompt(prompt_arg)?;
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .chain(args.images.iter().cloned())
@@ -910,7 +911,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 // CLI input doesn't track UI element ranges, so none are available here.
                 text_elements: Vec::new(),
             });
-            let output_schema = load_output_schema(output_schema_path.clone());
+            let output_schema = load_output_schema(output_schema_path.clone())?;
             (
                 InitialOperation::UserTurn {
                     items,
@@ -922,7 +923,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         (Some(ExecCommand::Fork(args)), root_prompt, imgs) => {
             let prompt_arg = args.prompt.clone().or(root_prompt);
             if let Some(prompt_arg) = prompt_arg {
-                let prompt_text = resolve_prompt(Some(prompt_arg));
+                let prompt_text = resolve_prompt(Some(prompt_arg))?;
                 let mut items: Vec<UserInput> = imgs
                     .into_iter()
                     .chain(args.images.iter().cloned())
@@ -932,7 +933,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     text: prompt_text.clone(),
                     text_elements: Vec::new(),
                 });
-                let output_schema = load_output_schema(output_schema_path);
+                let output_schema = load_output_schema(output_schema_path)?;
                 (
                     InitialOperation::UserTurn {
                         items,
@@ -951,7 +952,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             }
         }
         (None, root_prompt, imgs) => {
-            let prompt_text = resolve_root_prompt(root_prompt);
+            let prompt_text = resolve_root_prompt(root_prompt)?;
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .map(|path| UserInput::LocalImage { path, detail: None })
@@ -961,7 +962,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 // CLI input doesn't track UI element ranges, so none are available here.
                 text_elements: Vec::new(),
             });
-            let output_schema = load_output_schema(output_schema_path);
+            let output_schema = load_output_schema(output_schema_path)?;
             (
                 InitialOperation::UserTurn {
                     items,
@@ -979,7 +980,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         && get_git_repo_root(&default_cwd).is_none()
     {
         eprintln!("Not inside a trusted directory and --skip-git-repo-check was not specified.");
-        std::process::exit(1);
+        return Err(SilentExit::failure().into());
     }
 
     let mut request_ids = RequestIdSequencer::new();
@@ -1320,7 +1321,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
     event_processor.print_final_output();
     if error_seen {
-        std::process::exit(1);
+        // Return a silent exit instead of exiting so the arg0
+        // temporary-directory guard and other destructors run before the
+        // process terminates, without printing an extra diagnostic.
+        return Err(SilentExit::failure().into());
     }
 
     Ok(())
@@ -2130,8 +2134,10 @@ async fn handle_server_request(
     }
 }
 
-fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {
-    let path = path?;
+fn load_output_schema(path: Option<PathBuf>) -> anyhow::Result<Option<Value>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
 
     let schema_str = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -2140,18 +2146,18 @@ fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {
                 "Failed to read output schema file {}: {err}",
                 path.display()
             );
-            std::process::exit(1);
+            return Err(SilentExit::failure().into());
         }
     };
 
     match serde_json::from_str::<Value>(&schema_str) {
-        Ok(value) => Some(value),
+        Ok(value) => Ok(Some(value)),
         Err(err) => {
             eprintln!(
                 "Output schema file {} is not valid JSON: {err}",
                 path.display()
             );
-            std::process::exit(1);
+            Err(SilentExit::failure().into())
         }
     }
 }
@@ -2229,7 +2235,7 @@ fn decode_utf16(
     String::from_utf16(&units).map_err(|_| PromptDecodeError::InvalidUtf16 { encoding })
 }
 
-fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> Option<String> {
+fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> anyhow::Result<Option<String>> {
     let stdin_is_terminal = std::io::stdin().is_terminal();
 
     match behavior {
@@ -2237,13 +2243,13 @@ fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> Option<String> {
             eprintln!(
                 "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
             );
-            std::process::exit(1);
+            return Err(SilentExit::failure().into());
         }
         StdinPromptBehavior::RequiredIfPiped => {
             eprintln!("Reading prompt from stdin...");
         }
         StdinPromptBehavior::Forced => {}
-        StdinPromptBehavior::OptionalAppend if stdin_is_terminal => return None,
+        StdinPromptBehavior::OptionalAppend if stdin_is_terminal => return Ok(None),
         StdinPromptBehavior::OptionalAppend => {
             eprintln!("Reading additional input from stdin...");
         }
@@ -2252,27 +2258,27 @@ fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> Option<String> {
     let mut bytes = Vec::new();
     if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
         eprintln!("Failed to read prompt from stdin: {e}");
-        std::process::exit(1);
+        return Err(SilentExit::failure().into());
     }
 
     let buffer = match decode_prompt_bytes(&bytes) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read prompt from stdin: {e}");
-            std::process::exit(1);
+            return Err(SilentExit::failure().into());
         }
     };
 
     if buffer.trim().is_empty() {
         match behavior {
-            StdinPromptBehavior::OptionalAppend => None,
+            StdinPromptBehavior::OptionalAppend => Ok(None),
             StdinPromptBehavior::RequiredIfPiped | StdinPromptBehavior::Forced => {
                 eprintln!("No prompt provided via stdin.");
-                std::process::exit(1);
+                return Err(SilentExit::failure().into());
             }
         }
     } else {
-        Some(buffer)
+        Ok(Some(buffer))
     }
 }
 
@@ -2285,30 +2291,30 @@ fn prompt_with_stdin_context(prompt: &str, stdin_text: &str) -> String {
     combined
 }
 
-fn resolve_prompt(prompt_arg: Option<String>) -> String {
+fn resolve_prompt(prompt_arg: Option<String>) -> anyhow::Result<String> {
     match prompt_arg {
-        Some(p) if p != "-" => p,
+        Some(p) if p != "-" => Ok(p),
         maybe_dash => {
             let behavior = if matches!(maybe_dash.as_deref(), Some("-")) {
                 StdinPromptBehavior::Forced
             } else {
                 StdinPromptBehavior::RequiredIfPiped
             };
-            let Some(prompt) = read_prompt_from_stdin(behavior) else {
+            let Some(prompt) = read_prompt_from_stdin(behavior)? else {
                 unreachable!("required stdin prompt should produce content");
             };
-            prompt
+            Ok(prompt)
         }
     }
 }
 
-fn resolve_root_prompt(prompt_arg: Option<String>) -> String {
+fn resolve_root_prompt(prompt_arg: Option<String>) -> anyhow::Result<String> {
     match prompt_arg {
         Some(prompt) if prompt != "-" => {
-            if let Some(stdin_text) = read_prompt_from_stdin(StdinPromptBehavior::OptionalAppend) {
-                prompt_with_stdin_context(&prompt, &stdin_text)
+            if let Some(stdin_text) = read_prompt_from_stdin(StdinPromptBehavior::OptionalAppend)? {
+                Ok(prompt_with_stdin_context(&prompt, &stdin_text))
             } else {
-                prompt
+                Ok(prompt)
             }
         }
         maybe_dash => resolve_prompt(maybe_dash),
@@ -2326,7 +2332,7 @@ fn build_review_request(args: &ReviewArgs) -> anyhow::Result<ReviewRequest> {
             title: args.commit_title.clone(),
         }
     } else if let Some(prompt_arg) = args.prompt.clone() {
-        let prompt = resolve_prompt(Some(prompt_arg)).trim().to_string();
+        let prompt = resolve_prompt(Some(prompt_arg))?.trim().to_string();
         if prompt.is_empty() {
             anyhow::bail!("Review prompt cannot be empty");
         }

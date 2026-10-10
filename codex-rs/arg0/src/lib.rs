@@ -1,3 +1,8 @@
+mod silent_exit;
+
+pub use silent_exit::SilentExit;
+pub use silent_exit::exit_code_from_result;
+
 use std::ffi::OsString;
 use std::fs::File;
 use std::future::Future;

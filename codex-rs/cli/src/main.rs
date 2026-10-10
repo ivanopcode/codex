@@ -7,7 +7,9 @@ use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
 use codex_arg0::Arg0DispatchPaths;
+use codex_arg0::SilentExit;
 use codex_arg0::arg0_dispatch_or_else;
+use codex_arg0::exit_code_from_result;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::read_access_token_from_stdin;
@@ -1010,14 +1012,15 @@ fn stage_str(stage: Stage) -> &'static str {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     codex_build_info::initialize!();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
-    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+    let result = arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         // Keep the CLI dispatcher off the runtime's stack while the TUI rebuilds a thread.
         Box::pin(cli_main(arg0_paths, remote_control_disabled)).await?;
         Ok(())
-    })
+    });
+    exit_code_from_result(result)
 }
 
 async fn cli_main(
@@ -1030,7 +1033,17 @@ async fn cli_main(
         remote,
         mut interactive,
         subcommand,
-    } = MultitoolCli::parse();
+    } = match MultitoolCli::try_parse() {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            // Render clap's message exactly as `parse()` would, then return
+            // the same exit code through the silent path so the arg0 guard
+            // is dropped instead of leaked.
+            let code = u8::try_from(err.exit_code()).unwrap_or(1);
+            let _ = err.print();
+            return Err(SilentExit::new(code).into());
+        }
+    };
     // Retain the launch target through TUI exit, even if a launcher changes selection.
     let daemon_cli_executable = arg0_paths
         .codex_self_exe
