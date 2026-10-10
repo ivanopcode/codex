@@ -267,7 +267,7 @@ impl GoalAccountingState {
         let mut inner = self.inner();
         let transition = match inner.last_committed_plan.as_deref() {
             None => true,
-            Some(previous) => !plans_equal(previous, new_plan),
+            Some(previous) => previous.len() != new_plan.len(),
         };
         inner.last_committed_plan = Some(new_plan.to_vec());
         if !transition {
