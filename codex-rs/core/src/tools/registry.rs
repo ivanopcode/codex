@@ -83,6 +83,15 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         None
     }
 
+    /// Whether this runtime is a native agent wait tool (V1 or V2).
+    ///
+    /// Dynamic, MCP, and extension tools named `wait_agent` must not satisfy
+    /// this: only the native handlers (and their V2 namespace wrapper) return
+    /// true, so capability derivation can distinguish executable provenance.
+    fn is_native_wait_tool(&self) -> bool {
+        false
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(
             payload,

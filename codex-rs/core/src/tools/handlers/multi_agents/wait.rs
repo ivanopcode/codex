@@ -283,6 +283,10 @@ fn wait_receiver_agents(
 }
 
 impl CoreToolRuntime for Handler {
+    fn is_native_wait_tool(&self) -> bool {
+        true
+    }
+
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }
