@@ -11,7 +11,9 @@
 //! of the `codex-exec` binary.
 use clap::Parser;
 use codex_arg0::Arg0DispatchPaths;
+use codex_arg0::SilentExit;
 use codex_arg0::arg0_dispatch_or_else;
+use codex_arg0::exit_result_from_result;
 use codex_exec::Cli;
 use codex_exec::run_main;
 use codex_utils_cli::CliConfigOverrides;
@@ -25,9 +27,19 @@ struct TopCli {
     inner: Cli,
 }
 
-fn main() -> anyhow::Result<()> {
-    arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
-        let top_cli = TopCli::parse();
+fn main() -> Result<std::process::ExitCode, anyhow::Error> {
+    let result = arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
+        let top_cli = match TopCli::try_parse() {
+            Ok(top_cli) => top_cli,
+            Err(err) => {
+                // Render clap's message exactly as `parse()` would, then return
+                // the same exit code through the silent path so the arg0 guard
+                // is dropped instead of leaked.
+                let code = u8::try_from(err.exit_code()).unwrap_or(1);
+                let _ = err.print();
+                return Err(SilentExit::new(code).into());
+            }
+        };
         // Merge root-level overrides into inner CLI struct so downstream logic remains unchanged.
         let mut inner = top_cli.inner;
         inner
@@ -36,7 +48,8 @@ fn main() -> anyhow::Result<()> {
 
         run_main(inner, arg0_paths).await?;
         Ok(())
-    })
+    });
+    exit_result_from_result(result)
 }
 
 #[cfg(test)]
