@@ -1308,9 +1308,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
     event_processor.print_final_output();
     if error_seen {
-        // Return an error instead of exiting so the arg0 temporary-directory
-        // guard and other destructors run before the process terminates.
-        anyhow::bail!("exec turn failed");
+        std::process::exit(1);
     }
 
     Ok(())
