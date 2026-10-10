@@ -175,6 +175,24 @@ impl GoalRuntimeHandle {
             .unwrap_or_default()
     }
 
+    /// Returns how many state-changing outcomes were observed for `turn_id`.
+    ///
+    /// Counts applied file changes, actual plan transitions, committed goal
+    /// mutations, and accepted spawns/follow-ups recorded at their committing
+    /// handlers or events. Unknown or finished turns report zero. The count is
+    /// transient per-turn memory: it is never persisted to rollout or history,
+    /// and resume starts with no carried observation.
+    pub fn state_change_count(&self, turn_id: &str) -> u32 {
+        self.inner.accounting_state.state_change_count(turn_id)
+    }
+
+    /// Returns whether at least one state-changing outcome was observed.
+    pub fn has_observed_state_change(&self, turn_id: &str) -> bool {
+        self.inner
+            .accounting_state
+            .has_observed_state_change(turn_id)
+    }
+
     // Callers hold the goal-state permit across the committed mutation/read and
     // publication. Always re-read: delayed tool/API callbacks are not authority.
     pub(crate) async fn reconcile_activity(
@@ -370,6 +388,11 @@ impl GoalRuntimeHandle {
             .analytics
             .status_changed(&goal, previous_status, GoalEventAttribution::NoTurn);
         self.inner.background_wait.note_goal_mutation();
+        if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
+            self.inner
+                .accounting_state
+                .record_goal_mutation(turn_id.as_str());
+        }
         let objective_changed = previous_goal.as_ref().is_some_and(|previous_goal| {
             !replaced_existing_goal && previous_goal.objective != goal.objective
         });
@@ -416,6 +439,11 @@ impl GoalRuntimeHandle {
         self.inner.analytics.cleared(&goal);
         self.inner.background_wait.note_clear();
         if committed.is_none() {
+            if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
+                self.inner
+                    .accounting_state
+                    .record_goal_mutation(turn_id.as_str());
+            }
             self.inner.accounting_state.clear_active_goal();
         }
         Ok(())
