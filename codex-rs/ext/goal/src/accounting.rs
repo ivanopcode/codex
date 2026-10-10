@@ -298,9 +298,6 @@ impl GoalAccountingState {
                     && matches!(
                         item.tool,
                         CollabAgentTool::SpawnAgent
-                            | CollabAgentTool::SendInput
-                            | CollabAgentTool::SendMessage
-                            | CollabAgentTool::FollowupTask
                     ) =>
             {
                 self.record_spawn_followup(turn_id);
