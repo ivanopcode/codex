@@ -44,8 +44,8 @@ pub(crate) fn derive_waiting_capabilities(
     let stdin = is_directly_visible(&specs, &ToolName::plain(WRITE_STDIN_TOOL_NAME));
     let native_wait = find_direct_wait_agent(&specs);
     let host_available = AsyncNotificationSupport::read_from(thread_store).is_available();
+    let _ = exec_command_advertises_notify_on_exit(&specs);
     let exec_notify = host_available
-        && exec_command_advertises_notify_on_exit(&specs)
         && stdin
         && is_directly_visible(&specs, &ToolName::plain(EXEC_NOTIFICATION_TOOL_NAME));
     let native_mail_wait =
