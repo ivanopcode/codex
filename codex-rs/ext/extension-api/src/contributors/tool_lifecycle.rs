@@ -194,6 +194,26 @@ pub struct McpToolResultInput<'a> {
     pub result: &'a mut CallToolResult,
 }
 
+/// Input supplied when the host commits an `update_plan` change.
+///
+/// The host calls this only after the plan handler has parsed the arguments
+/// and published the `PlanUpdate` event, so observers see the committed plan
+/// rather than a ToolFinish success marker. Identical resubmissions still
+/// reach observers; comparing against the previous committed plan is the
+/// observer's responsibility.
+pub struct PlanCommitInput<'a> {
+    /// Store scoped to this thread runtime.
+    pub thread_store: &'a ExtensionData,
+    /// Store scoped to this turn runtime.
+    pub turn_store: &'a ExtensionData,
+    /// Current turn submission id.
+    pub turn_id: &'a str,
+    /// Model-visible tool call id.
+    pub call_id: &'a str,
+    /// Committed plan arguments as parsed by the host handler.
+    pub plan: &'a codex_protocol::plan_tool::UpdatePlanArgs,
+}
+
 /// Input supplied when the host finishes executing one tool call.
 pub struct ToolFinishInput<'a> {
     /// Store scoped to the host session runtime.
