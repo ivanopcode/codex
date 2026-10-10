@@ -45,12 +45,7 @@ pub(crate) fn derive_waiting_capabilities(
     discovered: &HashSet<ToolName>,
 ) -> WaitingCapabilities {
     let specs = router.model_visible_specs();
-    let sleep = is_callable(
-        router,
-        &specs,
-        discovered,
-        &ToolName::namespaced(CLOCK_NAMESPACE, SLEEP_TOOL_NAME),
-    );
+    let sleep = router.exposes_tool(&ToolName::namespaced(CLOCK_NAMESPACE, SLEEP_TOOL_NAME));
     let stdin = is_callable(
         router,
         &specs,
