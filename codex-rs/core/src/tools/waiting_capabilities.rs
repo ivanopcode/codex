@@ -48,8 +48,9 @@ pub(crate) fn derive_waiting_capabilities(
         && exec_command_advertises_notify_on_exit(&specs)
         && stdin
         && is_directly_visible(&specs, &ToolName::plain(EXEC_NOTIFICATION_TOOL_NAME));
-    let native_mail_wait =
-        host_available && thread_store.get::<GoalBackgroundWaitAdmission>().is_some();
+    let native_mail_wait = thread_store
+        .get::<GoalBackgroundWaitAdmission>()
+        .is_some();
     WaitingCapabilities {
         sleep,
         stdin,
