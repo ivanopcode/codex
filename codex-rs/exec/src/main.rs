@@ -29,17 +29,7 @@ struct TopCli {
 
 fn main() -> Result<std::process::ExitCode, anyhow::Error> {
     let result = arg0_dispatch_or_else(|arg0_paths: Arg0DispatchPaths| async move {
-        let top_cli = match TopCli::try_parse() {
-            Ok(top_cli) => top_cli,
-            Err(err) => {
-                // Render clap's message exactly as `parse()` would, then return
-                // the same exit code through the silent path so the arg0 guard
-                // is dropped instead of leaked.
-                let code = u8::try_from(err.exit_code()).unwrap_or(1);
-                let _ = err.print();
-                return Err(SilentExit::new(code).into());
-            }
-        };
+        let top_cli = TopCli::parse();
         // Merge root-level overrides into inner CLI struct so downstream logic remains unchanged.
         let mut inner = top_cli.inner;
         inner
