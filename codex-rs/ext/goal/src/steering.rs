@@ -1,6 +1,8 @@
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
+use codex_extension_api::PromptFragment;
+use codex_extension_api::WaitingCapabilities;
 use codex_prompts::without_update_plan_instructions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
@@ -55,6 +57,17 @@ pub(crate) fn continuation_steering_item(
     update_plan_enabled: bool,
 ) -> ResponseItem {
     goal_context_input_item(continuation_prompt(goal, update_plan_enabled))
+}
+
+/// Goal-specific waiting guidance for this sampling step.
+///
+/// The continuation-guidance leaf renders developer capabilities from
+/// `capabilities` here. The snapshot leaf only threads the snapshot through
+/// and emits nothing, so no prompt text changes in this leaf.
+pub(crate) fn waiting_capability_fragments(
+    _capabilities: &WaitingCapabilities,
+) -> Vec<PromptFragment> {
+    Vec::new()
 }
 
 fn goal_context_input_item(prompt: String) -> ResponseItem {
