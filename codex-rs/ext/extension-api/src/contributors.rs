@@ -48,6 +48,7 @@ pub use tool_lifecycle::CommandStartInput;
 pub use tool_lifecycle::McpToolContext;
 pub use tool_lifecycle::McpToolResultInput;
 pub use tool_lifecycle::McpToolSource;
+pub use tool_lifecycle::PlanCommitInput;
 pub use tool_lifecycle::ToolCallOutcome;
 pub use tool_lifecycle::ToolFinishInput;
 pub use tool_lifecycle::ToolLifecycleFuture;
@@ -407,6 +408,16 @@ pub trait ToolLifecycleContributor: Send + Sync {
     /// A matching start callback does not exist when execution is blocked,
     /// hook-provided input cannot be applied, or cancellation wins first.
     fn on_tool_finish<'a>(&'a self, _input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// Called after the host commits an `update_plan` change.
+    ///
+    /// This runs at the committing handler after argument parsing and event
+    /// publication, before the tool returns. It fires for identical
+    /// resubmissions as well; observers must compare against the previous
+    /// committed plan to detect an actual transition.
+    fn on_plan_committed<'a>(&'a self, _input: PlanCommitInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(std::future::ready(()))
     }
 

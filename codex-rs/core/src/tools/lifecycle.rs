@@ -3,6 +3,7 @@ use std::sync::Arc;
 use codex_extension_api::CommandStartInput;
 use codex_extension_api::McpToolContext;
 use codex_extension_api::McpToolResultInput;
+use codex_extension_api::PlanCommitInput;
 use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolCallSource as ExtensionToolCallSource;
 use codex_extension_api::ToolFinishInput;
@@ -156,6 +157,25 @@ async fn notify_tool_finish_parts(
                 tool_name,
                 source: extension_tool_call_source(source.clone()),
                 outcome,
+            })
+            .await;
+    }
+}
+
+pub(crate) async fn notify_plan_committed(
+    session: &Session,
+    turn: &TurnContext,
+    call_id: &str,
+    plan: &codex_protocol::plan_tool::UpdatePlanArgs,
+) {
+    for contributor in session.services.extensions.tool_lifecycle_contributors() {
+        contributor
+            .on_plan_committed(PlanCommitInput {
+                thread_store: &session.services.thread_extension_data,
+                turn_store: turn.extension_data.as_ref(),
+                turn_id: turn.sub_id.as_str(),
+                call_id,
+                plan,
             })
             .await;
     }

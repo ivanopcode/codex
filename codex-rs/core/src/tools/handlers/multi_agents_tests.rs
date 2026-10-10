@@ -12,12 +12,17 @@ use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::local_agent_graph_store_from_state_db;
+use crate::session::TurnInput;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::state::TaskKind;
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskResult;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -2740,6 +2745,162 @@ async fn send_input_accepts_structured_items() {
         ],
     )
     .await;
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+/// Occupies a child turn with a non-steerable `Compact` task so `send_input`
+/// delivery is refused while the child status stays `Running`.
+#[derive(Clone, Copy)]
+struct CompactBlockingTask;
+
+impl SessionTask for CompactBlockingTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Compact
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.compact_blocking_for_test"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        session: Arc<crate::session::session::Session>,
+        ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        // Real compact tasks announce the turn, driving the child to Running.
+        session.emit_turn_started(&ctx).await;
+        cancellation_token.cancelled().await;
+        Ok(None)
+    }
+}
+
+async fn wait_for_send_input_completion_status(
+    rx: &async_channel::Receiver<codex_protocol::protocol::Event>,
+) -> CollabAgentToolCallStatus {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::CollabAgentToolCall(call),
+                ..
+            }) = event.msg
+                && matches!(call.tool, CollabAgentTool::SendInput)
+            {
+                break call.status;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for send_input completion")
+}
+
+#[tokio::test]
+async fn send_input_rejected_compaction_emits_failed_item() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("parent session should be uniquely owned"),
+        manager.agent_control(),
+    );
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+
+    let child_session = Arc::clone(&thread.thread.session);
+    let child_turn = child_session
+        .new_turn_with_default_settings("compact-turn".to_string(), Default::default())
+        .await;
+    child_session
+        .spawn_task(
+            child_turn,
+            vec![TurnInput::UserInput {
+                content: vec![UserInput::Text {
+                    text: "compacting".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                client_id: None,
+                metadata: Default::default(),
+            }],
+            CompactBlockingTask,
+        )
+        .await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(thread.thread.agent_status().await, AgentStatus::Running) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child should reach Running while compacting");
+
+    let invocation = invocation(
+        session,
+        turn,
+        "send_input",
+        function_payload(json!({"target": agent_id.to_string(), "message": "hi"})),
+    );
+    let Err(err) = SendInputHandler.handle(invocation).await else {
+        panic!("send to a compacting child should be refused");
+    };
+    let FunctionCallError::RespondToModel(_) = err else {
+        panic!("refusal should be a model-visible error, got {err:?}");
+    };
+
+    // The completed item must report the refused delivery as Failed, not the
+    // child's still-Running liveness. Goal observations key on this status.
+    assert_eq!(
+        wait_for_send_input_completion_status(&rx).await,
+        CollabAgentToolCallStatus::Failed
+    );
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn send_input_accepted_emits_completed_item() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("parent session should be uniquely owned"),
+        manager.agent_control(),
+    );
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let invocation = invocation(
+        session,
+        turn,
+        "send_input",
+        function_payload(json!({"target": agent_id.to_string(), "message": "hi"})),
+    );
+    SendInputHandler
+        .handle(invocation)
+        .await
+        .expect("send_input should succeed");
+
+    assert_eq!(
+        wait_for_send_input_completion_status(&rx).await,
+        CollabAgentToolCallStatus::Completed
+    );
 
     let _ = thread
         .thread
