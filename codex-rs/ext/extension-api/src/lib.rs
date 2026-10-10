@@ -10,6 +10,7 @@ mod state;
 mod tool_policy;
 mod turn_admission;
 mod user_instructions;
+mod waiting_capabilities;
 
 pub use async_notification::AsyncNotificationSupport;
 pub use goal_activity::GoalActivity;
@@ -125,6 +126,7 @@ pub use user_instructions::LoadInstructionsFuture;
 pub use user_instructions::LoadedUserInstructions;
 pub use user_instructions::ThreadInstructionsProvider;
 pub use user_instructions::UserInstructionsProvider;
+pub use waiting_capabilities::WaitingCapabilities;
 
 pub use contributors::ToolDispatchInput;
 
