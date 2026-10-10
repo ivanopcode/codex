@@ -289,7 +289,8 @@ impl GoalAccountingState {
     pub(crate) fn record_state_change_for_item(&self, turn_id: &str, item: &TurnItem) {
         match item {
             TurnItem::FileChange(item)
-                if matches!(item.status, Some(PatchApplyStatus::Completed)) =>
+                if matches!(item.status, Some(PatchApplyStatus::Completed))
+                    && matches!(item.auto_approved, Some(true)) =>
             {
                 self.record_applied_file_change(turn_id);
             }
