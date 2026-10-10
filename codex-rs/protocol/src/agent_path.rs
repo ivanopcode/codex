@@ -141,13 +141,6 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
     if agent_name.is_empty() {
         return Err("agent_name must not be empty".to_string());
     }
-    let name_len = agent_name.len();
-    if name_len > AgentPath::MAX_SEGMENT_BYTES {
-        return Err(format!(
-            "agent_name must be at most {} bytes, got {name_len}",
-            AgentPath::MAX_SEGMENT_BYTES
-        ));
-    }
     if agent_name == AgentPath::ROOT_SEGMENT {
         return Err("agent_name `root` is reserved".to_string());
     }
