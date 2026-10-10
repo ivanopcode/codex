@@ -19,6 +19,21 @@ impl AgentPath {
     pub const MORPHEUS: &str = "/morpheus";
     const ROOT_SEGMENT: &str = "root";
 
+    /// Maximum length of a single path segment in bytes.
+    ///
+    /// Segments are created from model-supplied spawn names and copied verbatim
+    /// into model-visible envelope fields (`author`/`recipient`), so longer
+    /// names are rejected instead of silently truncated: the path is an
+    /// identity used for routing.
+    pub const MAX_SEGMENT_BYTES: usize = 128;
+
+    /// Maximum length of a full absolute agent path in bytes.
+    ///
+    /// Bounds nested spawn-created paths however deep the configured spawn
+    /// depth allows, so every `author`/`recipient` pair keeps a fixed upper
+    /// bound in model-visible items.
+    pub const MAX_PATH_BYTES: usize = 1024;
+
     pub fn root() -> Self {
         Self(Self::ROOT.to_string())
     }
@@ -126,6 +141,13 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
     if agent_name.is_empty() {
         return Err("agent_name must not be empty".to_string());
     }
+    let name_len = agent_name.len();
+    if name_len > AgentPath::MAX_SEGMENT_BYTES {
+        return Err(format!(
+            "agent_name must be at most {} bytes, got {name_len}",
+            AgentPath::MAX_SEGMENT_BYTES
+        ));
+    }
     if agent_name == AgentPath::ROOT_SEGMENT {
         return Err("agent_name `root` is reserved".to_string());
     }
@@ -147,6 +169,13 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
 }
 
 fn validate_absolute_path(path: &str) -> Result<(), String> {
+    let path_len = path.len();
+    if path_len > AgentPath::MAX_PATH_BYTES {
+        return Err(format!(
+            "absolute agent path must be at most {} bytes, got {path_len}",
+            AgentPath::MAX_PATH_BYTES
+        ));
+    }
     if path == AgentPath::MORPHEUS {
         return Ok(());
     }
@@ -236,5 +265,53 @@ mod tests {
             AgentPath::root().resolve("../sibling"),
             Err("agent_name `..` is reserved".to_string())
         );
+    }
+
+    #[test]
+    fn agent_path_rejects_overlong_segment() {
+        let overlong = "a".repeat(AgentPath::MAX_SEGMENT_BYTES + 1);
+        assert_eq!(
+            AgentPath::root().join(&overlong),
+            Err(format!(
+                "agent_name must be at most {} bytes, got {}",
+                AgentPath::MAX_SEGMENT_BYTES,
+                overlong.len()
+            ))
+        );
+    }
+
+    #[test]
+    fn agent_path_accepts_segment_at_cap() {
+        let at_cap = "a".repeat(AgentPath::MAX_SEGMENT_BYTES);
+        let child = AgentPath::root()
+            .join(&at_cap)
+            .expect("segment at cap should be accepted");
+        assert_eq!(child.as_str(), format!("/root/{at_cap}"));
+    }
+
+    #[test]
+    fn agent_path_rejects_absolute_path_over_total_cap() {
+        let path = format!("/root/{}", vec!["a"; 600].join("/"));
+        assert!(path.len() > AgentPath::MAX_PATH_BYTES);
+        assert_eq!(
+            AgentPath::try_from(path.as_str()),
+            Err(format!(
+                "absolute agent path must be at most {} bytes, got {}",
+                AgentPath::MAX_PATH_BYTES,
+                path.len()
+            ))
+        );
+    }
+
+    #[test]
+    fn agent_path_accepts_absolute_path_at_total_cap() {
+        // "/root" (5) + 7 segments of 128 (7 * 129) + one segment of 115
+        // (116) == 1024.
+        let mut segments = vec!["a".repeat(AgentPath::MAX_SEGMENT_BYTES); 7];
+        segments.push("b".repeat(115));
+        let path = format!("/root/{}", segments.join("/"));
+        assert_eq!(path.len(), AgentPath::MAX_PATH_BYTES);
+        let parsed = AgentPath::try_from(path.as_str()).expect("path at total cap");
+        assert_eq!(parsed.as_str(), path);
     }
 }
