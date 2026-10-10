@@ -107,22 +107,13 @@ impl Handler {
             .await
             .map_err(|err| collab_agent_error(receiver_thread_id, err));
         let status = local_agent_control.get_status(receiver_thread_id).await;
-        // Report the delivery result, not child liveness: a refused send is
-        // Failed even while the child stays Running, and an accepted send is
-        // Completed even if the child errors afterwards. Liveness stays in
-        // agents_states for display.
-        let delivery_status = if result.is_ok() {
-            CollabAgentToolCallStatus::Completed
-        } else {
-            CollabAgentToolCallStatus::Failed
-        };
         session
             .emit_turn_item_completed(
                 &turn,
                 TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                     id: call_id,
                     tool: CollabAgentTool::SendInput,
-                    status: delivery_status,
+                    status: collab_tool_call_status(&status, Some(receiver_thread_id)),
                     sender_thread_id: session.thread_id,
                     receiver_thread_ids: vec![receiver_thread_id],
                     receiver_agents: vec![CollabAgentRef {
