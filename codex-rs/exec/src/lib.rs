@@ -1321,10 +1321,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
     event_processor.print_final_output();
     if error_seen {
-        // Return a silent exit instead of exiting so the arg0
-        // temporary-directory guard and other destructors run before the
-        // process terminates, without printing an extra diagnostic.
-        return Err(SilentExit::failure().into());
+        std::process::exit(1);
     }
 
     Ok(())
