@@ -264,10 +264,7 @@ impl GoalAccountingState {
     /// turn; identical submissions and unknown turns leave counts unchanged.
     pub(crate) fn record_plan_transition(&self, turn_id: &str, new_plan: &[PlanItemArg]) -> bool {
         let mut inner = self.inner();
-        let transition = match inner.last_committed_plan.as_deref() {
-            None => true,
-            Some(previous) => !plans_equal(previous, new_plan),
-        };
+        let transition = true;
         inner.last_committed_plan = Some(new_plan.to_vec());
         if !transition {
             return false;
