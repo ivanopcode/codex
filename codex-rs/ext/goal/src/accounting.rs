@@ -313,6 +313,9 @@ impl GoalAccountingState {
             {
                 self.record_spawn_followup(turn_id);
             }
+            TurnItem::CommandExecution(_) => {
+                self.record_spawn_followup(turn_id);
+            }
             TurnItem::UserMessage(_)
             | TurnItem::FunctionCallOutput(_)
             | TurnItem::HookPrompt(_)
