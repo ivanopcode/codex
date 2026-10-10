@@ -317,8 +317,10 @@ impl GoalToolExecutor {
                 )
             })?;
         self.runtime.background_wait_state().note_goal_mutation();
-        self.accounting_state
-            .record_goal_mutation(invocation.turn_id.as_str());
+        if args.status == ThreadGoalStatus::Complete {
+            self.accounting_state
+                .record_goal_mutation(invocation.turn_id.as_str());
+        }
         self.metrics
             .record_terminal_if_status_changed(previous_status, &goal);
         self.analytics.status_changed(
