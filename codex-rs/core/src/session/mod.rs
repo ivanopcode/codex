@@ -3968,6 +3968,10 @@ impl Session {
             selected_plugins,
         ) = prepared_tools??;
         turn_context.extension_data.insert(selected_plugins);
+        let waiting_capabilities = crate::tools::waiting_capabilities::derive_waiting_capabilities(
+            &tool_router,
+            &self.services.thread_extension_data,
+        );
         Ok(Arc::new(StepContext {
             preempt: turn_context
                 .config
@@ -3984,6 +3988,7 @@ impl Session {
             executor_capability_discovery,
             mcp,
             tool_router,
+            waiting_capabilities,
             loaded_agents_md,
         }))
     }
@@ -4283,7 +4288,7 @@ impl Session {
         }
     }
 
-    async fn build_turn_context_contribution_items(
+    pub(crate) async fn build_turn_context_contribution_items(
         &self,
         step_context: &StepContext,
     ) -> Vec<ResponseItem> {
@@ -4300,6 +4305,7 @@ impl Session {
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),
                     model_context_window: step_context.settings.model_info.usable_context_window(),
+                    waiting_capabilities: &step_context.waiting_capabilities,
                 })
                 .await
             {
@@ -4397,6 +4403,7 @@ impl Session {
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),
                     model_context_window: step_context.settings.model_info.usable_context_window(),
+                    waiting_capabilities: &step_context.waiting_capabilities,
                 })
                 .await
             {
