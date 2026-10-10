@@ -388,11 +388,6 @@ impl GoalRuntimeHandle {
             .analytics
             .status_changed(&goal, previous_status, GoalEventAttribution::NoTurn);
         self.inner.background_wait.note_goal_mutation();
-        if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
-            self.inner
-                .accounting_state
-                .record_goal_mutation(turn_id.as_str());
-        }
         let objective_changed = previous_goal.as_ref().is_some_and(|previous_goal| {
             !replaced_existing_goal && previous_goal.objective != goal.objective
         });
