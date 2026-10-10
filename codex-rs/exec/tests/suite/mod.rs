@@ -17,4 +17,5 @@ mod sandbox;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod server_error_exit;
+mod tmpdir_cleanup;
 mod worktree;
