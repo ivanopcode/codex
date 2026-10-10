@@ -2,6 +2,12 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_extension_api::AsyncNotificationSupport;
+use codex_extension_api::ContextContributor;
+use codex_extension_api::ExtensionFuture;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PromptFragment;
+use codex_extension_api::TurnContextContributionInput;
+use codex_extension_api::WaitingCapabilities;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -31,6 +37,8 @@ use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 const EXEC_COMPLETION_WRAPPER: &str = "source=\"exec_completion\"";
@@ -722,5 +730,107 @@ async fn exec_notification_unknown_receipt_rejected() -> Result<()> {
         "unknown receipt should be rejected: {read_output}"
     );
     wait_for_turn_complete(&test).await;
+    Ok(())
+}
+
+struct WaitingCapabilitiesRecorder {
+    captures: Arc<Mutex<Vec<WaitingCapabilities>>>,
+}
+
+impl ContextContributor for WaitingCapabilitiesRecorder {
+    fn contribute_turn_context<'a>(
+        &'a self,
+        input: TurnContextContributionInput<'a>,
+    ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
+        Box::pin(async move {
+            self.captures
+                .lock()
+                .expect("captures lock should not be poisoned")
+                .push(input.waiting_capabilities.clone());
+            Vec::new()
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_subscription_does_not_flip_waiting_capabilities() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses POSIX sleep/echo");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.prompt_contributor(Arc::new(WaitingCapabilitiesRecorder {
+        captures: Arc::clone(&captures),
+    }));
+    let mut builder = test_codex()
+        .with_model("gpt-5.2")
+        .with_extensions(Arc::new(extensions.build()));
+    let test = builder.build_with_auto_env(&server).await?;
+    seed_available_host(&test);
+
+    let launch_args = json!({
+        "cmd": "sleep 2; echo done-mark".to_string(),
+        "yield_time_ms": 250,
+        "notify_on_exit": true,
+    });
+    mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    "call-launch",
+                    "exec_command",
+                    &serde_json::to_string(&launch_args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "launched"),
+                ev_completed("resp-2"),
+            ]),
+            // Idle wake for the opted-in exit.
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-2", "noted the completion"),
+                ev_completed("resp-3"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-4"),
+                ev_assistant_message("msg-3", "all quiet"),
+                ev_completed("resp-4"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_exec_turn(&test, "launch with notification").await?;
+    let launch_output = wait_for_function_output(&test, "call-launch").await;
+    assert!(
+        armed_receipt_handle(&launch_output).is_some(),
+        "launch should acknowledge a receipt: {launch_output}"
+    );
+    wait_for_turn_complete(&test).await;
+    // The exit (~2s) wakes an idle turn before the explicit turn below.
+    wait_for_turn_complete(&test).await;
+    submit_exec_turn(&test, "anything new?").await?;
+    wait_for_turn_complete(&test).await;
+
+    let captures = captures.lock().expect("captures lock should read");
+    assert!(
+        captures.len() >= 2,
+        "expected pre-arm and post-arm samples, got {}",
+        captures.len(),
+    );
+    for snapshot in captures.iter() {
+        assert_eq!(*snapshot, captures[0]);
+    }
+    // The capability is present independent of subscription state; no goal is
+    // installed, so no native mail wait is advertised.
+    assert!(captures[0].exec_notify);
+    assert!(!captures[0].native_mail_wait);
     Ok(())
 }

@@ -31,6 +31,7 @@ use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
 use codex_extension_api::TurnItemContributor;
 use codex_extension_api::TurnLifecycleContributor;
+use codex_extension_api::WaitingCapabilities;
 use codex_protocol::items::HookPromptItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
@@ -310,6 +311,7 @@ async fn contributors_preserve_registration_order() {
     let session_store = ExtensionData::new("session");
     let thread_store = ExtensionData::new("thread");
     let turn_store = ExtensionData::new("turn");
+    let waiting_capabilities = WaitingCapabilities::none();
 
     let mut fragments = Vec::new();
     for contributor in registry.context_contributors() {
@@ -329,6 +331,7 @@ async fn contributors_preserve_registration_order() {
                     thread_store: &thread_store,
                     turn_store: &turn_store,
                     model_context_window: Some(123),
+                    waiting_capabilities: &waiting_capabilities,
                 })
                 .await,
         );
