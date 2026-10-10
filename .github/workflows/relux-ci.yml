@@ -175,7 +175,7 @@ jobs:
 
       - name: Small crates tests
         if: env.LANE == 'small'
-        run: INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-tools -p codex-goal-extension -p codex-extension-api -p codex-rollout-trace -p codex-queue-extension -p codex-exec
+        run: INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-tools -p codex-goal-extension -p codex-extension-api -p codex-rollout-trace -p codex-queue-extension -p codex-exec -p codex-arg0 -p codex-cli
 
       - name: Helper binaries for integration tests
         if: env.LANE == 'core' || env.LANE == 'app-server'
@@ -321,7 +321,7 @@ jobs:
           filter=()
           # A mutant whose killer tests live in the other lane matches nothing here; that must not count as a failure.
           [ -z "$TEST_FILTER" ] || filter=(-E "$TEST_FILTER" --no-tests=pass)
-          INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-tools -p codex-goal-extension -p codex-extension-api -p codex-rollout-trace -p codex-queue-extension -p codex-exec "${filter[@]}"
+          INSTA_WORKSPACE_ROOT="$PWD" just test -p codex-tools -p codex-goal-extension -p codex-extension-api -p codex-rollout-trace -p codex-queue-extension -p codex-exec -p codex-arg0 -p codex-cli "${filter[@]}"
 
       - name: Helper binaries for integration tests
         if: env.LANE == 'core' || env.LANE == 'app-server'
