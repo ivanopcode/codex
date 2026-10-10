@@ -246,6 +246,8 @@ impl GoalToolExecutor {
             })?;
         fill_empty_thread_preview_if_possible(self.state_db.as_ref(), self.thread_id, &goal).await;
         self.runtime.background_wait_state().note_goal_mutation();
+        self.accounting_state
+            .record_goal_mutation(invocation.turn_id.as_str());
         let turn_id = self
             .accounting_state
             .mark_current_turn_goal_active(goal.goal_id.clone());
@@ -315,6 +317,8 @@ impl GoalToolExecutor {
                 )
             })?;
         self.runtime.background_wait_state().note_goal_mutation();
+        self.accounting_state
+            .record_goal_mutation(invocation.turn_id.as_str());
         self.metrics
             .record_terminal_if_status_changed(previous_status, &goal);
         self.analytics.status_changed(
