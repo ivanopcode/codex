@@ -240,13 +240,6 @@ fn validate_relative_reference(reference: &str) -> Result<(), String> {
 /// Validates a model-supplied segment for a NEW child identity: the shared
 /// grammar plus the new-identity segment cap.
 fn validate_new_agent_name(agent_name: &str) -> Result<(), String> {
-    let name_len = agent_name.len();
-    if name_len > AgentPath::MAX_SEGMENT_BYTES {
-        return Err(format!(
-            "agent_name must be at most {} bytes, got {name_len}",
-            AgentPath::MAX_SEGMENT_BYTES
-        ));
-    }
     validate_agent_name(agent_name)
 }
 
