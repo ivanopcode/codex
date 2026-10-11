@@ -3478,6 +3478,11 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        // This root/parent lineage test drives two consecutive automatic goal
+        // continuations back to back; pacing postdates it and would insert a
+        // 60s delay before the second. Disable pacing so the lineage waits
+        // stay immediate (production never sets this switch).
+        .with_env_overrides(&[("CODEX_GOAL_PACING_DISABLED", Some("1"))])
         .build_initialized()
         .await?;
     let thread = mcp.start_thread(ThreadStartParams::default()).await?.thread;

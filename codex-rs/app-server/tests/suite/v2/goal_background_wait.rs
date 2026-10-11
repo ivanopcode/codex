@@ -184,6 +184,9 @@ async fn start_goal_harness(
         .with_codex_home(home.path())
         .without_managed_config()
         .with_args(extra_server_args)
+        // Low-activity pacing postdates these background-wait tests; disable
+        // it so they keep their immediate-continuation timing.
+        .with_env_overrides(&[("CODEX_GOAL_PACING_DISABLED", Some("1"))])
         .build_initialized()
         .await?;
     let request = app
