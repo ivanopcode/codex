@@ -39,6 +39,9 @@ pub(crate) struct StepContext {
     pub(crate) mcp: Arc<McpBinding>,
     /// The finalized tool plan advertised and executed for this exact sampling request.
     pub(crate) tool_router: Arc<ToolRouter>,
+    /// Waiting tools callable in this sampling step, derived once from the
+    /// finalized router above. Both context paths share this same instance.
+    pub(crate) waiting_capabilities: codex_extension_api::WaitingCapabilities,
     /// The canonical AGENTS.md value observed with this environment snapshot.
     pub(crate) loaded_agents_md: Option<Arc<LoadedAgentsMd>>,
 }

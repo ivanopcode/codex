@@ -6,11 +6,18 @@ use codex_config::types::McpServerTransportConfig;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
+use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PromptFragment;
 use codex_extension_api::ToolContributor;
+use codex_extension_api::TurnContextContributionInput;
+use codex_extension_api::WaitingCapabilities;
 use codex_features::Feature;
+use codex_features::SleepToolMode;
 use codex_login::CodexAuth;
+use codex_models_manager::bundled_models_response;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
@@ -19,6 +26,7 @@ use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::McpInvocation;
@@ -60,6 +68,7 @@ use core_test_support::responses::ev_custom_tool_call_with_namespace;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_tool_search_call;
+use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::namespace_child_tool;
@@ -71,11 +80,15 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
+use pretty_assertions::assert_ne;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
+use wiremock::BodyPrintLimit;
+use wiremock::MockServer;
 
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
@@ -931,6 +944,391 @@ async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
     ));
     assert!(description.contains("### Designing delegated subtasks"));
     assert!(description.contains("### When to delegate vs. do the subtask yourself"));
+
+    Ok(())
+}
+
+struct WaitingCapabilitiesRecorder {
+    captures: Arc<Mutex<Vec<WaitingCapabilities>>>,
+}
+
+impl ContextContributor for WaitingCapabilitiesRecorder {
+    fn contribute_turn_context<'a>(
+        &'a self,
+        input: TurnContextContributionInput<'a>,
+    ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
+        Box::pin(async move {
+            self.captures
+                .lock()
+                .expect("captures lock should not be poisoned")
+                .push(input.waiting_capabilities.clone());
+            Vec::new()
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovered_native_wait_updates_waiting_capabilities() -> Result<()> {
+    // A2-F1/D-F1: a REAL tool_search round trip for the deferred V1 wait
+    // tool. The next request must expose the discovered definition through
+    // paired call/output history, and the step's WaitingCapabilities must
+    // report the native name only after that discovery. Turn-context
+    // contributors run on full context and on turn-context changes, so a
+    // second turn with a different approval policy samples the post-discovery
+    // step snapshot.
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "tool-search-wait-agent";
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_tool_search_call(
+                    call_id,
+                    &json!({
+                        "query": "wait agent",
+                    }),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-2", "still done"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.prompt_contributor(Arc::new(WaitingCapabilitiesRecorder {
+        captures: Arc::clone(&captures),
+    }));
+    let mut builder = test_codex()
+        .with_config(configure_search_capable_model)
+        .with_extensions(Arc::new(extensions.build()));
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Find the wait agent tool",
+        AskForApproval::Never,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Use what you found",
+        AskForApproval::OnRequest,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 3);
+
+    let first_request_tools = tool_names(&requests[0].body_json());
+    assert!(
+        first_request_tools
+            .iter()
+            .any(|name| name == TOOL_SEARCH_TOOL_NAME),
+        "first request should advertise tool_search: {first_request_tools:?}"
+    );
+    assert!(
+        !first_request_tools.iter().any(|name| name == "wait_agent"),
+        "v1 wait_agent should be hidden before search: {first_request_tools:?}"
+    );
+
+    assert!(
+        tool_search_output_has_namespace_child(
+            &requests[1],
+            call_id,
+            "multi_agent_v1",
+            "wait_agent"
+        ),
+        "expected tool_search to return multi_agent_v1.wait_agent: {:?}",
+        tool_search_output_tools(&requests[1], call_id),
+    );
+
+    let captures = captures.lock().expect("captures lock should read");
+    assert!(
+        captures.len() >= 2,
+        "expected pre- and post-discovery samples, got {}",
+        captures.len(),
+    );
+    let first = captures.first().expect("expected a pre-discovery sample");
+    assert_eq!(
+        first.native_wait, None,
+        "native_wait should be None before discovery",
+    );
+    let last = captures.last().expect("expected a post-discovery sample");
+    assert_eq!(
+        last.native_wait,
+        Some(ToolName::namespaced("multi_agent_v1", "wait_agent")),
+        "native_wait should carry the discovered native name after search",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_null_id_discovery_updates_waiting_capabilities() -> Result<()> {
+    // A3-F1/D3-F1: a completed SERVER `tool_search_output` with `call_id:
+    // null` is a supported protocol shape that prompt normalization retains.
+    // When it carries the deferred `multi_agent_v1.wait_agent` definition,
+    // the next step's WaitingCapabilities must report it. Turn-context
+    // contributors run on full context and on turn-context changes, so a
+    // second turn with a different approval policy samples the post-discovery
+    // step snapshot.
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let loadable = json!({
+        "type": "namespace",
+        "name": "multi_agent_v1",
+        "description": "Native agents.",
+        "tools": [
+            {"type": "function", "name": "wait_agent", "description": "Wait."},
+        ],
+    });
+    let server_output = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "tool_search_output",
+            "execution": "server",
+            "call_id": null,
+            "status": "completed",
+            "tools": [loadable],
+        },
+    });
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                server_output,
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "still done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.prompt_contributor(Arc::new(WaitingCapabilitiesRecorder {
+        captures: Arc::clone(&captures),
+    }));
+    let mut builder = test_codex()
+        .with_config(configure_search_capable_model)
+        .with_extensions(Arc::new(extensions.build()));
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Find the wait agent tool",
+        AskForApproval::Never,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Use what you found",
+        AskForApproval::OnRequest,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+
+    let first_request_tools = tool_names(&requests[0].body_json());
+    assert!(
+        first_request_tools
+            .iter()
+            .any(|name| name == TOOL_SEARCH_TOOL_NAME),
+        "first request should advertise tool_search: {first_request_tools:?}"
+    );
+    assert!(
+        !first_request_tools.iter().any(|name| name == "wait_agent"),
+        "v1 wait_agent should be hidden before discovery: {first_request_tools:?}"
+    );
+
+    let server_outputs = requests[1].inputs_of_type("tool_search_output");
+    assert!(
+        server_outputs.iter().any(|output| {
+            output.get("execution").and_then(Value::as_str) == Some("server")
+                && output.get("call_id").is_none_or(Value::is_null)
+                && namespace_child_tool(output, "multi_agent_v1", "wait_agent").is_some()
+        }),
+        "second request should carry the server null-ID discovery: {server_outputs:?}",
+    );
+
+    let captures = captures.lock().expect("captures lock should read");
+    assert!(
+        captures.len() >= 2,
+        "expected pre- and post-discovery samples, got {}",
+        captures.len(),
+    );
+    let first = captures.first().expect("expected a pre-discovery sample");
+    assert_eq!(
+        first.native_wait, None,
+        "native_wait should be None before discovery",
+    );
+    let last = captures.last().expect("expected a post-discovery sample");
+    assert_eq!(
+        last.native_wait,
+        Some(ToolName::namespaced("multi_agent_v1", "wait_agent")),
+        "native_wait should carry the discovered native name after server null-ID discovery",
+    );
+
+    Ok(())
+}
+
+async fn remote_catalog_replacement_case(
+    slug: &str,
+    remote_supported_tools: Vec<String>,
+    expected: WaitingCapabilities,
+) -> Result<()> {
+    // Use MockServer directly so the first /models request returns our
+    // same-slug remote replacement. start_mock_server mounts empty models
+    // first, which would win the session-start fetch.
+    let server = MockServer::builder()
+        .body_print_limit(BodyPrintLimit::Limited(80_000))
+        .start()
+        .await;
+    let catalog = bundled_models_response()?;
+    let mut remote = catalog
+        .models
+        .iter()
+        .find(|model| model.slug == slug)
+        .expect("bundled slug should exist")
+        .clone();
+    let bundled_tools = remote.experimental_supported_tools.clone();
+    let bundled_has_clock = bundled_tools.iter().any(|tool| tool == "clock");
+    let remote_has_clock = remote_supported_tools.iter().any(|tool| tool == "clock");
+    assert_ne!(
+        bundled_has_clock, remote_has_clock,
+        "remote should flip clock support for {slug}"
+    );
+    let mut bundled_rest: Vec<&str> = bundled_tools
+        .iter()
+        .filter(|tool| tool.as_str() != "clock")
+        .map(String::as_str)
+        .collect();
+    let mut remote_rest: Vec<&str> = remote_supported_tools
+        .iter()
+        .filter(|tool| tool.as_str() != "clock")
+        .map(String::as_str)
+        .collect();
+    bundled_rest.sort_unstable();
+    remote_rest.sort_unstable();
+    assert_eq!(
+        bundled_rest, remote_rest,
+        "remote should differ only in clock for {slug}"
+    );
+    remote.experimental_supported_tools = remote_supported_tools;
+    let models_mock = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![remote],
+        },
+    )
+    .await;
+    let responses_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.prompt_contributor(Arc::new(WaitingCapabilitiesRecorder {
+        captures: Arc::clone(&captures),
+    }));
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model(slug)
+        .with_config(|config| {
+            config
+                .features
+                .disable(Feature::CurrentTimeReminder)
+                .expect("reminder should be disableable");
+            config
+                .features
+                .enable(Feature::SleepTool)
+                .expect("sleep should be enableable");
+            config.sleep_tool_mode = SleepToolMode::ModelDriven;
+            config.agents_enabled = false;
+        })
+        .with_extensions(Arc::new(extensions.build()));
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn("hello remote catalog").await?;
+
+    assert_eq!(
+        models_mock.requests().len(),
+        1,
+        "expected a single /models fetch for {slug}"
+    );
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].tool_by_name("clock", "sleep").is_some(),
+        expected.sleep,
+        "request tools should follow the remote entry for {slug}"
+    );
+    let captures = captures.lock().expect("captures lock should read");
+    assert!(
+        !captures.is_empty(),
+        "expected a snapshot sample for {slug}"
+    );
+    assert_eq!(captures[0], expected);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_catalog_replacement_changes_waiting_snapshot() -> Result<()> {
+    // AC5 remote leg: the same slug served remotely replaces the bundled
+    // entry (ModelsManager::apply_remote_models), and the step snapshot
+    // follows the remote clock support in both directions.
+    skip_if_no_network!(Ok(()));
+
+    remote_catalog_replacement_case(
+        "gpt-5.5",
+        vec!["clock".to_string()],
+        WaitingCapabilities {
+            sleep: true,
+            stdin: true,
+            native_wait: None,
+            exec_notify: false,
+            native_mail_wait: false,
+        },
+    )
+    .await?;
+
+    remote_catalog_replacement_case(
+        "gpt-6-astra",
+        vec!["send_user_message_async".to_string()],
+        WaitingCapabilities {
+            sleep: false,
+            stdin: false,
+            native_wait: None,
+            exec_notify: false,
+            native_mail_wait: false,
+        },
+    )
+    .await?;
 
     Ok(())
 }
