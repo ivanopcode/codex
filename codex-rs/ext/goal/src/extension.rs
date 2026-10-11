@@ -11,6 +11,7 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PlanCommitInput;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
@@ -341,9 +342,9 @@ where
             if let Some(runtime) = goal_runtime_handle(thread_store)
                 && runtime.is_enabled()
             {
-                runtime
-                    .accounting_state()
-                    .record_item(turn_store.level_id(), item);
+                let accounting = runtime.accounting_state();
+                accounting.record_item(turn_store.level_id(), item);
+                accounting.record_state_change_for_item(turn_store.level_id(), item);
             }
         })
     }
@@ -515,6 +516,20 @@ impl<C> ToolLifecycleContributor for GoalExtension<C>
 where
     C: Send + Sync + 'static,
 {
+    fn on_plan_committed<'a>(&'a self, input: PlanCommitInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            let Some(runtime) = goal_runtime_handle(input.thread_store) else {
+                return;
+            };
+            if !runtime.is_enabled() {
+                return;
+            }
+            runtime
+                .accounting_state()
+                .record_plan_transition(input.turn_id, &input.plan.plan);
+        })
+    }
+
     fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
