@@ -415,6 +415,11 @@ async fn app_server_blocks_goal_after_repeated_code_mode_host_failures() -> Resu
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_args(&["--code-mode-host", &host_url])
+        // This failure-counting test drives three consecutive automatic goal
+        // continuations back to back; pacing postdates it and would insert
+        // 60s/120s delays. Disable pacing so the blocked-wait stays immediate
+        // (production never sets this switch).
+        .with_env_overrides(&[("CODEX_GOAL_PACING_DISABLED", Some("1"))])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     let thread = app_server
