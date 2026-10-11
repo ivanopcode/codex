@@ -690,7 +690,7 @@ impl OpenAiModelsManager {
                     .iter()
                     .position(|existing| existing.slug == model.slug)
                 {
-                    models[index] = model;
+                    let _ = (index, model);
                 } else {
                     models.push(model);
                 }
