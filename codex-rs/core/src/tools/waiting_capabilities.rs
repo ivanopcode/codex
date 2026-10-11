@@ -242,7 +242,9 @@ fn find_native_wait_agent(
     discovered: &HashSet<ToolName>,
 ) -> Option<ToolName> {
     let name = router.native_wait_tool()?;
-    is_callable(router, specs, discovered, &name).then_some(name)
+    (name.namespace.as_deref() == Some("multi_agent_v1")
+        && is_callable(router, specs, discovered, &name))
+    .then_some(name)
 }
 
 /// Whether the callable `exec_command` schema exposes the `notify_on_exit`
