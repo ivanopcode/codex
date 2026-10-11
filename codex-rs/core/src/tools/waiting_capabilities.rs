@@ -110,14 +110,10 @@ pub(crate) fn discovered_waiting_tools_from_history<'a>(
             }
             ResponseItem::ToolSearchOutput {
                 call_id,
-                execution,
                 tools,
                 ..
             } => {
-                let paired = match call_id {
-                    Some(call_id) => execution == "server" || calls.contains(call_id.as_str()),
-                    None => false,
-                };
+                let paired = call_id.is_some();
                 if !paired {
                     continue;
                 }
