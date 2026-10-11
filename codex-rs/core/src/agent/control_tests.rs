@@ -4710,6 +4710,66 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
 }
 
 #[tokio::test]
+async fn resume_agent_preserves_legacy_overlong_path() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    // Valid under the pre-cap grammar (129-byte segment), over the
+    // new-spawn cap: simulates an identity persisted before the cap.
+    let legacy_str = format!("/root/{}", "l".repeat(AgentPath::MAX_SEGMENT_BYTES + 1));
+    let legacy_path =
+        AgentPath::try_from(legacy_str.as_str()).expect("legacy overlong path should parse");
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello legacy"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(legacy_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+        )
+        .await
+        .expect("spawn with legacy path should succeed");
+
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    persist_thread_for_tree_resume(&child_thread, "persist before resume").await;
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should succeed");
+
+    let resumed_thread_id = harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), child_thread_id, SessionSource::Exec)
+        .await
+        .expect("resume with legacy overlong path should succeed");
+    assert_eq!(resumed_thread_id, child_thread_id);
+    let resumed_thread = harness
+        .manager
+        .get_thread(resumed_thread_id)
+        .await
+        .expect("resumed child thread should exist");
+    assert_eq!(
+        resumed_thread.session_source.get_agent_path(),
+        Some(legacy_path)
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("resumed child shutdown should succeed");
+}
+
+#[tokio::test]
 async fn resume_agent_from_paginated_rollout_loads_model_context() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
@@ -5639,4 +5699,67 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .shutdown_agent_tree(parent_thread_id)
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
+}
+
+#[tokio::test]
+async fn owned_children_inspection_propagates_failed_lookups() {
+    use crate::agent::owned_children::OwnedChildInspection;
+    use crate::agent::owned_children::OwnedChildrenReadError;
+
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+    let child_thread_id = harness
+        .spawn_anonymous_child(parent_thread_id, SpawnAgentOptions::default())
+        .await;
+    let unknown_thread_id = ThreadId::new();
+
+    let manager = harness
+        .control
+        .runtime
+        .upgrade()
+        .expect("manager should be available");
+    let inspections = harness
+        .control
+        .runtime
+        .inspect_owned_child_ids(&manager, &[child_thread_id])
+        .await
+        .expect("loaded child should inspect");
+    assert_eq!(inspections.len(), 1);
+    assert_matches!(
+        &inspections[0],
+        OwnedChildInspection::Loaded { thread_id, .. } if *thread_id == child_thread_id
+    );
+
+    let err = harness
+        .control
+        .runtime
+        .inspect_owned_child_ids(&manager, &[child_thread_id, unknown_thread_id])
+        .await
+        .expect_err("unknown child must propagate, not skip");
+    assert_eq!(
+        err,
+        OwnedChildrenReadError::UnknownChild {
+            thread_id: unknown_thread_id,
+        }
+    );
+
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child_thread_id)
+            .await
+            .is_some()
+    );
+    let inspections = harness
+        .control
+        .runtime
+        .inspect_owned_child_ids(&manager, &[child_thread_id])
+        .await
+        .expect("known unloaded child should report unloaded");
+    assert_eq!(
+        inspections,
+        vec![OwnedChildInspection::Unloaded {
+            thread_id: child_thread_id,
+        }]
+    );
 }

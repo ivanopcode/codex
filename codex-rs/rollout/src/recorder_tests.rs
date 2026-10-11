@@ -344,6 +344,75 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
 }
 
 #[tokio::test]
+async fn get_rollout_history_preserves_legacy_agent_path() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let mut file = File::create(&rollout_path)?;
+    let thread_id = ThreadId::new();
+    let parent_thread_id = ThreadId::new();
+    let ts = "2025-01-03T12:00:00Z";
+    // Valid under the pre-cap grammar (129-byte segment), over the
+    // new-spawn cap: a legacy rollout must still decode byte-identically,
+    // with zero parse errors and its thread id intact.
+    let legacy_path = format!("/root/{}", "l".repeat(129));
+
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "timestamp": ts,
+                "cwd": ".",
+                "originator": "test_originator",
+                "cli_version": "test_version",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": parent_thread_id,
+                            "depth": 1,
+                            "agent_path": legacy_path,
+                            "agent_nickname": null,
+                            "agent_role": "worker",
+                        }
+                    }
+                },
+                "agent_path": legacy_path,
+                "model_provider": "test-provider",
+            },
+        })
+    )?;
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    assert_eq!(items.len(), 1);
+    let RolloutItem::SessionMeta(session_meta) = &items[0] else {
+        panic!("expected session metadata");
+    };
+    assert_eq!(session_meta.meta.id, thread_id);
+    assert_eq!(
+        session_meta.meta.agent_path.as_deref(),
+        Some(legacy_path.as_str())
+    );
+    assert_eq!(
+        session_meta.meta.source.get_agent_path().as_deref(),
+        Some(legacy_path.as_str())
+    );
+
+    let history = RolloutRecorder::get_rollout_history(&rollout_path).await?;
+    let InitialHistory::Resumed(resumed) = history else {
+        panic!("expected resumed history");
+    };
+    assert_eq!(resumed.conversation_id, thread_id);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_rollout_items_ignores_unknown_fork_source_history_mode() -> std::io::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::new_v4();
