@@ -239,10 +239,10 @@ fn is_directly_visible(specs: &[ToolSpec], name: &ToolName) -> bool {
 fn find_native_wait_agent(
     router: &ToolRouter,
     specs: &[ToolSpec],
-    discovered: &HashSet<ToolName>,
+    _discovered: &HashSet<ToolName>,
 ) -> Option<ToolName> {
     let name = router.native_wait_tool()?;
-    is_callable(router, specs, discovered, &name).then_some(name)
+    is_directly_visible(specs, &name).then_some(name)
 }
 
 /// Whether the callable `exec_command` schema exposes the `notify_on_exit`
