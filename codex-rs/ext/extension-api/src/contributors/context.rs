@@ -1,6 +1,7 @@
 use codex_protocol::ThreadId;
 
 use crate::ExtensionData;
+use crate::WaitingCapabilities;
 
 /// Host context available while extensions contribute turn-scoped context fragments.
 #[derive(Clone, Copy)]
@@ -17,4 +18,7 @@ pub struct TurnContextContributionInput<'a> {
     pub turn_store: &'a ExtensionData,
     /// Usable context window of the captured model for this context build, when known.
     pub model_context_window: Option<i64>,
+    /// Waiting tools callable in this sampling step, derived from the final
+    /// captured router. Both context paths share the same snapshot instance.
+    pub waiting_capabilities: &'a WaitingCapabilities,
 }
