@@ -143,7 +143,7 @@ pub(crate) fn thread_spawn_source(
             parent_session_source
                 .get_agent_path()
                 .unwrap_or_else(AgentPath::root)
-                .join(task_name)
+                .join_new(task_name)
                 .map_err(FunctionCallError::RespondToModel)
         })
         .transpose()?;
