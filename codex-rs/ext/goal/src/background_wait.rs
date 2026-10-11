@@ -759,7 +759,7 @@ impl BackgroundWaitState {
         if had_state_change {
             state.pacing_streak = 0;
         } else {
-            state.pacing_streak = state.pacing_streak.saturating_add(1);
+            state.pacing_streak = 0;
         }
     }
 
