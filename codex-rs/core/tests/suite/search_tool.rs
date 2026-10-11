@@ -6,9 +6,14 @@ use codex_config::types::McpServerTransportConfig;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
+use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PromptFragment;
 use codex_extension_api::ToolContributor;
+use codex_extension_api::TurnContextContributionInput;
+use codex_extension_api::WaitingCapabilities;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
@@ -75,6 +80,7 @@ use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::rmcp_client::remote_aware_environment_id;
@@ -931,6 +937,134 @@ async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
     ));
     assert!(description.contains("### Designing delegated subtasks"));
     assert!(description.contains("### When to delegate vs. do the subtask yourself"));
+
+    Ok(())
+}
+
+struct WaitingCapabilitiesRecorder {
+    captures: Arc<Mutex<Vec<WaitingCapabilities>>>,
+}
+
+impl ContextContributor for WaitingCapabilitiesRecorder {
+    fn contribute_turn_context<'a>(
+        &'a self,
+        input: TurnContextContributionInput<'a>,
+    ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
+        Box::pin(async move {
+            self.captures
+                .lock()
+                .expect("captures lock should not be poisoned")
+                .push(input.waiting_capabilities.clone());
+            Vec::new()
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovered_native_wait_updates_waiting_capabilities() -> Result<()> {
+    // A2-F1/D-F1: a REAL tool_search round trip for the deferred V1 wait
+    // tool. The next request must expose the discovered definition through
+    // paired call/output history, and the step's WaitingCapabilities must
+    // report the native name only after that discovery. Turn-context
+    // contributors run on full context and on turn-context changes, so a
+    // second turn with a different approval policy samples the post-discovery
+    // step snapshot.
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "tool-search-wait-agent";
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_tool_search_call(
+                    call_id,
+                    &json!({
+                        "query": "wait agent",
+                    }),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-2", "still done"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.prompt_contributor(Arc::new(WaitingCapabilitiesRecorder {
+        captures: Arc::clone(&captures),
+    }));
+    let mut builder = test_codex()
+        .with_config(configure_search_capable_model)
+        .with_extensions(Arc::new(extensions.build()));
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Find the wait agent tool",
+        AskForApproval::Never,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    test.submit_turn_with_approval_and_permission_profile(
+        "Use what you found",
+        AskForApproval::OnRequest,
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 3);
+
+    let first_request_tools = tool_names(&requests[0].body_json());
+    assert!(
+        first_request_tools
+            .iter()
+            .any(|name| name == TOOL_SEARCH_TOOL_NAME),
+        "first request should advertise tool_search: {first_request_tools:?}"
+    );
+    assert!(
+        !first_request_tools.iter().any(|name| name == "wait_agent"),
+        "v1 wait_agent should be hidden before search: {first_request_tools:?}"
+    );
+
+    assert!(
+        tool_search_output_has_namespace_child(
+            &requests[1],
+            call_id,
+            "multi_agent_v1",
+            "wait_agent"
+        ),
+        "expected tool_search to return multi_agent_v1.wait_agent: {:?}",
+        tool_search_output_tools(&requests[1], call_id),
+    );
+
+    let captures = captures.lock().expect("captures lock should read");
+    assert!(
+        captures.len() >= 2,
+        "expected pre- and post-discovery samples, got {}",
+        captures.len(),
+    );
+    let first = captures.first().expect("expected a pre-discovery sample");
+    assert_eq!(
+        first.native_wait, None,
+        "native_wait should be None before discovery",
+    );
+    let last = captures.last().expect("expected a post-discovery sample");
+    assert_eq!(
+        last.native_wait,
+        Some(ToolName::namespaced("multi_agent_v1", "wait_agent")),
+        "native_wait should carry the discovered native name after search",
+    );
 
     Ok(())
 }
