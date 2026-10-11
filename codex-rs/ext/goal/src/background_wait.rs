@@ -612,12 +612,6 @@ impl BackgroundWaitState {
             state.pacing_outstanding = None;
             return GoalAdmissionDecision::Wait;
         }
-        if snapshot.revision() != attempt.expected_revision
-            || snapshot.revision() != ticket.expected_revision()
-        {
-            state.pacing_outstanding = None;
-            return GoalAdmissionDecision::Wait;
-        }
         if state.pacing_predecessor.as_deref() != ticket.predecessor_turn() {
             state.pacing_outstanding = None;
             return GoalAdmissionDecision::Wait;
