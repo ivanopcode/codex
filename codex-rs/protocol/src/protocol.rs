@@ -885,7 +885,7 @@ impl InterAgentCommunication {
         // while the stored `author`/`recipient` identities stay full: legacy
         // over-cap paths can reach here through resume, so render truncated
         // display copies (byte-identical for short paths).
-        let author = self.author.truncated_for_display();
+        let author = self.author.to_string();
         let recipient = self.recipient.truncated_for_display();
         let content = match &self.encrypted_content {
             Some(encrypted_content) => {
