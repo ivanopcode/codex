@@ -204,6 +204,13 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
 }
 
 fn validate_absolute_path(path: &str) -> Result<(), String> {
+    let path_len = path.len();
+    if path_len > AgentPath::MAX_PATH_BYTES {
+        return Err(format!(
+            "absolute agent path must be at most {} bytes, got {path_len}",
+            AgentPath::MAX_PATH_BYTES
+        ));
+    }
     if path == AgentPath::MORPHEUS {
         return Ok(());
     }
