@@ -12,12 +12,17 @@ use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::local_agent_graph_store_from_state_db;
+use crate::session::TurnInput;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::state::TaskKind;
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskResult;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -2740,6 +2745,486 @@ async fn send_input_accepts_structured_items() {
         ],
     )
     .await;
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+/// Occupies a child turn with a non-steerable `Compact` task so `send_input`
+/// delivery is refused while the child status stays `Running`.
+#[derive(Clone, Copy)]
+struct CompactBlockingTask;
+
+impl SessionTask for CompactBlockingTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Compact
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.compact_blocking_for_test"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        session: Arc<crate::session::session::Session>,
+        ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        // Real compact tasks announce the turn, driving the child to Running.
+        session.emit_turn_started(&ctx).await;
+        cancellation_token.cancelled().await;
+        Ok(None)
+    }
+}
+
+async fn wait_for_send_input_completion_status(
+    rx: &async_channel::Receiver<codex_protocol::protocol::Event>,
+) -> CollabAgentToolCallStatus {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::CollabAgentToolCall(call),
+                ..
+            }) = event.msg
+                && matches!(call.tool, CollabAgentTool::SendInput)
+            {
+                break call.status;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for send_input completion")
+}
+
+#[tokio::test]
+async fn send_input_rejected_compaction_emits_failed_item() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("parent session should be uniquely owned"),
+        manager.agent_control(),
+    );
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+
+    let child_session = Arc::clone(&thread.thread.session);
+    let child_turn = child_session
+        .new_turn_with_default_settings("compact-turn".to_string(), Default::default())
+        .await;
+    child_session
+        .spawn_task(
+            child_turn,
+            vec![TurnInput::UserInput {
+                content: vec![UserInput::Text {
+                    text: "compacting".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                client_id: None,
+                metadata: Default::default(),
+            }],
+            CompactBlockingTask,
+        )
+        .await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(thread.thread.agent_status().await, AgentStatus::Running) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child should reach Running while compacting");
+
+    let invocation = invocation(
+        session,
+        turn,
+        "send_input",
+        function_payload(json!({"target": agent_id.to_string(), "message": "hi"})),
+    );
+    let Err(err) = SendInputHandler.handle(invocation).await else {
+        panic!("send to a compacting child should be refused");
+    };
+    let FunctionCallError::RespondToModel(_) = err else {
+        panic!("refusal should be a model-visible error, got {err:?}");
+    };
+
+    // The completed item must report the refused delivery as Failed, not the
+    // child's still-Running liveness. Goal observations key on this status.
+    assert_eq!(
+        wait_for_send_input_completion_status(&rx).await,
+        CollabAgentToolCallStatus::Failed
+    );
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn send_input_accepted_emits_completed_item() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("parent session should be uniquely owned"),
+        manager.agent_control(),
+    );
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let invocation = invocation(
+        session,
+        turn,
+        "send_input",
+        function_payload(json!({"target": agent_id.to_string(), "message": "hi"})),
+    );
+    SendInputHandler
+        .handle(invocation)
+        .await
+        .expect("send_input should succeed");
+
+    assert_eq!(
+        wait_for_send_input_completion_status(&rx).await,
+        CollabAgentToolCallStatus::Completed
+    );
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+use crate::agent::api::AgentConfigUpdate;
+use crate::agent::api::AgentControl;
+use crate::agent::api::AgentInfo;
+use crate::agent::api::AgentTarget;
+use crate::agent::api::AgentTurnOutcome;
+use crate::agent::api::DeliveryReceipt;
+use crate::agent::api::SendRequest;
+use crate::agent::api::SpawnRequest;
+use crate::agent::types::AgentExecutionGuard;
+use crate::agent::types::AgentMetadata;
+use crate::agent::types::LiveAgent;
+use crate::codex_thread::GuardianRootSnapshot;
+use crate::codex_thread::ThreadConfigSnapshot;
+use crate::rollout_budget::RolloutBudgetReminder;
+use codex_protocol::SessionId;
+use codex_protocol::error::CodexErr;
+use codex_protocol::items::CollabAgentToolCallItem;
+use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::TokenUsage;
+use codex_rollout_trace::ThreadTraceContext;
+use futures::future::BoxFuture;
+
+/// Deterministic accepted-receipt fixture for V1 spawn delivery binding.
+///
+/// The real `LocalAgentControl::spawn_agent_internal` samples child liveness
+/// after committing the spawn, so an accepted spawn can carry an already
+/// `Errored` status. This stub returns that accepted receipt directly, pinning
+/// the handler mapping without racing real child execution.
+struct StubSpawnAgentControl {
+    session_id: SessionId,
+    child_id: ThreadId,
+    snapshot: ThreadConfigSnapshot,
+    status: AgentStatus,
+    spawn_error: Option<String>,
+}
+
+impl AgentControl for StubSpawnAgentControl {
+    fn identity(&self) -> SessionId {
+        self.session_id
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        _caller: ThreadId,
+        _parent: Option<ThreadId>,
+        _source: &'a SessionSource,
+        _target: &'a str,
+    ) -> BoxFuture<'a, codex_protocol::error::Result<ThreadId>> {
+        Box::pin(async {
+            Err(CodexErr::InvalidRequest(
+                "stub resolve rejection".to_string(),
+            ))
+        })
+    }
+
+    fn spawn(
+        &self,
+        _request: SpawnRequest,
+    ) -> BoxFuture<'_, codex_protocol::error::Result<(LiveAgent, ThreadConfigSnapshot)>> {
+        let child_id = self.child_id;
+        let snapshot = self.snapshot.clone();
+        let status = self.status.clone();
+        let spawn_error = self.spawn_error.clone();
+        Box::pin(async move {
+            if let Some(message) = spawn_error {
+                return Err(CodexErr::InvalidRequest(message));
+            }
+            Ok((
+                LiveAgent {
+                    thread_id: child_id,
+                    metadata: AgentMetadata {
+                        agent_id: Some(child_id),
+                        ..Default::default()
+                    },
+                    status,
+                },
+                snapshot,
+            ))
+        })
+    }
+
+    fn send(
+        &self,
+        _request: SendRequest,
+    ) -> BoxFuture<'_, codex_protocol::error::Result<DeliveryReceipt>> {
+        Box::pin(async { Err(CodexErr::InvalidRequest("stub send rejection".to_string())) })
+    }
+
+    fn ensure_child_loaded(
+        &self,
+        _parent: ThreadId,
+        _child: ThreadId,
+    ) -> BoxFuture<'_, codex_protocol::error::Result<()>> {
+        Box::pin(async {
+            Err(CodexErr::InvalidRequest(
+                "stub resume rejection".to_string(),
+            ))
+        })
+    }
+
+    fn interrupt(
+        &self,
+        _caller: ThreadId,
+        _target: AgentTarget,
+        _version: MultiAgentVersion,
+    ) -> BoxFuture<'_, codex_protocol::error::Result<AgentInfo>> {
+        Box::pin(async {
+            Err(CodexErr::InvalidRequest(
+                "stub interrupt rejection".to_string(),
+            ))
+        })
+    }
+
+    fn list<'a>(
+        &'a self,
+        _caller: ThreadId,
+        _parent: Option<ThreadId>,
+        _source: &'a SessionSource,
+        _path_prefix: Option<&'a str>,
+    ) -> BoxFuture<'a, codex_protocol::error::Result<Vec<LiveAgent>>> {
+        Box::pin(async { Err(CodexErr::InvalidRequest("stub list rejection".to_string())) })
+    }
+
+    fn child_agent_paths(&self, _parent: ThreadId) -> BoxFuture<'_, Vec<AgentPath>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    fn check_turn_admission(
+        &self,
+        _version: MultiAgentVersion,
+        _source: &SessionSource,
+    ) -> codex_protocol::error::Result<()> {
+        Ok(())
+    }
+
+    fn admit_turn(
+        &self,
+        _version: MultiAgentVersion,
+        _source: &SessionSource,
+    ) -> Option<AgentExecutionGuard> {
+        None
+    }
+
+    fn record_usage(&self, _usage: TokenUsage) -> BoxFuture<'_, codex_protocol::error::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn turn_finished<'a>(
+        &'a self,
+        _outcome: AgentTurnOutcome,
+        _trace: &'a ThreadTraceContext,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn service_tier(&self) -> Option<String> {
+        None
+    }
+
+    fn propagate_config_update(&self, _update: AgentConfigUpdate) {}
+
+    fn get_guardian_package(
+        &self,
+        _agent: ThreadId,
+    ) -> BoxFuture<'_, Option<GuardianRootSnapshot>> {
+        Box::pin(async { None })
+    }
+
+    fn pending_budget_reminder<'a>(
+        &'a self,
+        _agent: ThreadId,
+        _window: &'a str,
+    ) -> BoxFuture<'a, Option<RolloutBudgetReminder>> {
+        Box::pin(async { None })
+    }
+
+    fn mark_budget_reminder_delivered<'a>(
+        &'a self,
+        _agent: ThreadId,
+        _window: &'a str,
+        _reminder: RolloutBudgetReminder,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
+async fn wait_for_spawn_agent_completion_item(
+    rx: &async_channel::Receiver<codex_protocol::protocol::Event>,
+) -> CollabAgentToolCallItem {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::CollabAgentToolCall(call),
+                ..
+            }) = event.msg
+                && matches!(call.tool, CollabAgentTool::SpawnAgent)
+            {
+                break call;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for spawn_agent completion")
+}
+
+#[tokio::test]
+async fn spawn_agent_accepted_with_errored_child_emits_completed_item() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("parent session should be uniquely owned"),
+        manager.agent_control(),
+    );
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start thread");
+    let snapshot = thread.thread.config_snapshot().await;
+    let child_id = thread.thread_id;
+    let session_id = session.session_id();
+    let stub: Arc<dyn AgentControl> = Arc::new(StubSpawnAgentControl {
+        session_id,
+        child_id,
+        snapshot,
+        status: AgentStatus::Errored("boom".to_string()),
+        spawn_error: None,
+    });
+    Arc::get_mut(&mut session)
+        .expect("parent session should be uniquely owned")
+        .services
+        .agent_control = stub;
+
+    let invocation = invocation(
+        session,
+        turn,
+        "spawn_agent",
+        function_payload(json!({"message": "do work"})),
+    );
+    let output = SpawnAgentHandler::default()
+        .handle(invocation)
+        .await
+        .expect("accepted spawn with an errored child should succeed");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(success, Some(true));
+    let agent_id = serde_json::from_str::<serde_json::Value>(&content)
+        .expect("spawn result should be json")
+        .get("agent_id")
+        .and_then(|value| value.as_str())
+        .expect("spawn result should carry agent_id")
+        .to_string();
+    assert_eq!(agent_id, child_id.to_string());
+
+    // The completed item must report the accepted delivery as Completed, not
+    // the child's already-Errored liveness. Goal observations key on this
+    // status: Completed SpawnAgent counts 1, Failed counts 0.
+    let item = wait_for_spawn_agent_completion_item(&rx).await;
+    assert_eq!(item.status, CollabAgentToolCallStatus::Completed);
+    assert_eq!(
+        item.agents_states.get(&child_id),
+        Some(&AgentStatus::Errored("boom".to_string()))
+    );
+    assert_eq!(item.receiver_thread_ids, vec![child_id]);
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_agent_refused_emits_failed_item() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("parent session should be uniquely owned"),
+        manager.agent_control(),
+    );
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start thread");
+    let snapshot = thread.thread.config_snapshot().await;
+    let session_id = session.session_id();
+    let stub: Arc<dyn AgentControl> = Arc::new(StubSpawnAgentControl {
+        session_id,
+        child_id: ThreadId::new(),
+        snapshot,
+        status: AgentStatus::NotFound,
+        spawn_error: Some("stub spawn rejection".to_string()),
+    });
+    Arc::get_mut(&mut session)
+        .expect("parent session should be uniquely owned")
+        .services
+        .agent_control = stub;
+
+    let invocation = invocation(
+        session,
+        turn,
+        "spawn_agent",
+        function_payload(json!({"message": "do work"})),
+    );
+    let Err(err) = SpawnAgentHandler::default().handle(invocation).await else {
+        panic!("refused spawn should fail");
+    };
+    let FunctionCallError::RespondToModel(_) = err else {
+        panic!("refusal should be a model-visible error, got {err:?}");
+    };
+
+    let item = wait_for_spawn_agent_completion_item(&rx).await;
+    assert_eq!(item.status, CollabAgentToolCallStatus::Failed);
+    assert!(item.receiver_thread_ids.is_empty());
+    assert!(item.agents_states.is_empty());
 
     let _ = thread
         .thread

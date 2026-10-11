@@ -720,6 +720,80 @@ async fn tool_start_is_not_called_when_pre_tool_hook_prevents_execution() -> Res
     Ok(())
 }
 
+#[derive(Default)]
+struct PlanCommitRecorder {
+    commits: Mutex<Vec<(String, String)>>,
+}
+
+impl ToolLifecycleContributor for PlanCommitRecorder {
+    fn on_plan_committed<'a>(
+        &'a self,
+        input: codex_extension_api::PlanCommitInput<'a>,
+    ) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            let plan_json =
+                serde_json::to_string(&input.plan.plan).expect("committed plan should serialize");
+            self.commits
+                .lock()
+                .expect("plan commit recorder should unlock")
+                .push((input.call_id.to_string(), plan_json));
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_committed_hook_fires_for_successful_update_plan() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let call_id = "plan-commit-call";
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_function_call(
+                    call_id,
+                    "update_plan",
+                    &json!({
+                        "plan": [{ "step": "Inspect workspace", "status": "in_progress" }]
+                    })
+                    .to_string(),
+                ),
+                responses::ev_completed("plan-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("assistant-1", "done"),
+                responses::ev_completed("done-response"),
+            ]),
+        ],
+    )
+    .await;
+
+    let recorder = Arc::new(PlanCommitRecorder::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(recorder.clone());
+    let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| config.update_plan_enabled = true)
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_text_turn("Inspect the workspace and update the plan.")
+        .await?;
+
+    let commits = recorder
+        .commits
+        .lock()
+        .expect("plan commit recorder should unlock");
+    assert_eq!(1, commits.len());
+    assert_eq!(call_id, commits[0].0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&commits[0].1)?,
+        json!([{ "step": "Inspect workspace", "status": "in_progress" }])
+    );
+    Ok(())
+}
+
 fn write_pre_tool_hook(home: &Path, matcher: &str, output: &serde_json::Value) -> Result<()> {
     let script_path = home.join("tool_lifecycle_hook.py");
     let output_json = serde_json::to_string(output).context("serialize pre-tool hook output")?;

@@ -70,7 +70,7 @@ impl PlanHandler {
         let ToolInvocation {
             session,
             turn,
-            call_id: _,
+            call_id,
             payload,
             ..
         } = invocation;
@@ -92,8 +92,15 @@ impl PlanHandler {
 
         let args = parse_update_plan_arguments(&arguments)?;
         session
-            .send_event(turn.as_ref(), EventMsg::PlanUpdate(args))
+            .send_event(turn.as_ref(), EventMsg::PlanUpdate(args.clone()))
             .await;
+        crate::tools::lifecycle::notify_plan_committed(
+            session.as_ref(),
+            turn.as_ref(),
+            call_id.as_str(),
+            &args,
+        )
+        .await;
 
         Ok(boxed_tool_output(PlanToolOutput))
     }
