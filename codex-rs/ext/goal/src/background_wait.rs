@@ -323,12 +323,6 @@ impl BackgroundWaitState {
         snapshot: Result<PendingWorkSnapshot, PendingWorkReadError>,
         now: Duration,
     ) -> BackgroundWaitEvaluation {
-        if status == GoalWaitStatus::InactiveOrBudgetLimited {
-            state.wait_started_at = None;
-            state.pacing_wait_started_at = None;
-            state.pending_deadline = None;
-            return BackgroundWaitEvaluation::ProceedWithoutGate;
-        }
         if !state.enabled && !state.pacing_enabled {
             state.pending_deadline = None;
             return BackgroundWaitEvaluation::ProceedWithoutGate;
