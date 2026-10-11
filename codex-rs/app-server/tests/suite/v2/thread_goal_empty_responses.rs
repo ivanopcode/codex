@@ -66,6 +66,9 @@ async fn empty_goal_continuations_block_after_three_without_activity(
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        // Low-activity pacing postdates this blocker test; disable it so the
+        // empty-continuation timing stays immediate.
+        .with_env_overrides(&[("CODEX_GOAL_PACING_DISABLED", Some("1"))])
         .build_initialized()
         .await?;
     let request = mcp

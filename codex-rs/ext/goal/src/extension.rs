@@ -181,6 +181,11 @@ where
             if AsyncNotificationSupport::read_from(input.thread_store).is_available() {
                 runtime.background_wait_state().enable();
             }
+            // Low-activity pacing is always active in production; the kill
+            // switch exists only so pre-pacing suites keep their timing.
+            if !crate::continuation_schedule::pacing_disabled_by_env() {
+                runtime.background_wait_state().enable_pacing();
+            }
             self.goal_service.register_runtime(&runtime);
         })
     }
@@ -411,6 +416,16 @@ where
                     |current| current.is_some(),
                 );
             }
+            // The three-empty-continuations blocker above runs first and is
+            // unchanged; pacing records the completed turn's observation after
+            // it, while the per-turn count is still readable.
+            let is_continuation = accounting.is_goal_continuation(turn_id);
+            let had_state_change = accounting.has_observed_state_change(turn_id);
+            runtime.background_wait_state().note_turn_completed(
+                turn_id,
+                is_continuation,
+                had_state_change,
+            );
             accounting.finish_turn(turn_id);
         })
     }

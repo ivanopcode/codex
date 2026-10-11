@@ -679,7 +679,8 @@ impl GoalRuntimeHandle {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         }
-        if self.inner.background_wait.is_enabled() {
+        if self.inner.background_wait.is_enabled() || self.inner.background_wait.is_pacing_enabled()
+        {
             let snapshot = codex_extension_api::read_pending_work(thread.thread_extension_data());
             let now = self.inner.check_in_timer.clock().now();
             match self.inner.background_wait.evaluate_continuation(
@@ -688,9 +689,16 @@ impl GoalRuntimeHandle {
                 snapshot,
                 now,
             ) {
-                BackgroundWaitEvaluation::ProceedWithoutGate
-                | BackgroundWaitEvaluation::ProceedNormal { .. }
-                | BackgroundWaitEvaluation::ProceedWithTicket { .. } => {
+                BackgroundWaitEvaluation::ProceedWithoutGate => {
+                    // No gate engaged: drop any previously published checker
+                    // so Core admits without consulting stale state.
+                    thread
+                        .thread_extension_data()
+                        .remove::<codex_extension_api::GoalBackgroundWaitAdmission>();
+                }
+                BackgroundWaitEvaluation::ProceedNormal { .. }
+                | BackgroundWaitEvaluation::ProceedWithTicket { .. }
+                | BackgroundWaitEvaluation::ProceedWithPacingTicket { .. } => {
                     thread
                         .thread_extension_data()
                         .insert(self.inner.background_wait.admission_checker());
