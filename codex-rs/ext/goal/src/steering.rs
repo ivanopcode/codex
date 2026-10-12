@@ -104,10 +104,10 @@ pub(crate) fn waiting_capability_fragments(
     if capabilities.stdin {
         sentences.push(WAITING_STDIN.to_string());
     }
-    if let Some(native_wait) = capabilities.native_wait.as_ref() {
+    if let Some(_native_wait) = capabilities.native_wait.as_ref() {
         sentences.push(format!(
             "{WAITING_NATIVE_WAIT} (Tool name: {}.)",
-            render_native_wait_tool_name(native_wait)
+            "wait_agent"
         ));
     }
     if capabilities.native_mail_wait {
