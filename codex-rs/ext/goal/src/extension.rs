@@ -623,15 +623,6 @@ where
         input: TurnContextContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
         Box::pin(async move {
-            // Goal-active threads only: the marker is present for Active and
-            // BudgetLimited goals and removed for every other status, so
-            // threads with no goal (or a paused, blocked, usage-limited, or
-            // complete goal) contribute nothing and see no model-visible
-            // change. There is deliberately no core fragment for goal-less
-            // threads.
-            if input.thread_store.get::<GoalActivity>().is_none() {
-                return Vec::new();
-            }
             crate::steering::waiting_capability_fragments(input.waiting_capabilities)
         })
     }
