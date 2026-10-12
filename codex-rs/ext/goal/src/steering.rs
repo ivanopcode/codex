@@ -93,11 +93,7 @@ pub(crate) fn waiting_capability_fragments(
     capabilities: &WaitingCapabilities,
 ) -> Vec<PromptFragment> {
     let mut sentences = Vec::with_capacity(5);
-    if capabilities.exec_notify {
-        sentences.push(WAITING_EXEC_NOTIFY.to_string());
-    } else {
-        sentences.push(WAITING_NO_EXEC_NOTIFY.to_string());
-    }
+    sentences.push(WAITING_EXEC_NOTIFY.to_string());
     if capabilities.sleep {
         sentences.push(WAITING_SLEEP.to_string());
     }
