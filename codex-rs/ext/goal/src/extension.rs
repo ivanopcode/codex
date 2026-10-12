@@ -380,9 +380,12 @@ where
                 );
                 return;
             }
-            if let Err(err) = runtime
-                .stop_active_goal_for_turn(turn_id, ActiveGoalStopReason::EmptyResponse)
-                .await
+            let pacing_reschedules = runtime.background_wait_state().is_pacing_enabled()
+                && runtime.accounting_state().is_goal_continuation(turn_id);
+            if !pacing_reschedules
+                && let Err(err) = runtime
+                    .stop_active_goal_for_turn(turn_id, ActiveGoalStopReason::EmptyResponse)
+                    .await
             {
                 runtime.revoke_activity_on_read_failure(input.thread_store, &err);
                 input.thread_store.remove::<TurnStartOptions>();
