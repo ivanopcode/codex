@@ -299,6 +299,9 @@ impl StepContext {
                 /*tool_namespaces_info*/ None,
                 &[],
             )),
+            // The empty test router exposes no waiting tools; host and policy
+            // markers default off without a thread store.
+            waiting_capabilities: codex_extension_api::WaitingCapabilities::none(),
             loaded_agents_md: None,
         })
     }
@@ -307,9 +310,17 @@ impl StepContext {
         mut self: Arc<Self>,
         tool_router: Arc<ToolRouter>,
     ) -> Arc<Self> {
-        Arc::get_mut(&mut self)
-            .expect("test step context must not be shared before its tool router is set")
-            .tool_router = tool_router;
+        // Tool flags follow the replacement router; host and policy markers
+        // default off without a thread store, and no tools are discovered.
+        let waiting_capabilities = crate::tools::waiting_capabilities::derive_waiting_capabilities(
+            &tool_router,
+            &codex_extension_api::ExtensionData::new(self.turn.sub_id.clone()),
+            &std::collections::HashSet::new(),
+        );
+        let this = Arc::get_mut(&mut self)
+            .expect("test step context must not be shared before its tool router is set");
+        this.tool_router = tool_router;
+        this.waiting_capabilities = waiting_capabilities;
         self
     }
 }

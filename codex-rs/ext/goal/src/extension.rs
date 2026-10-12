@@ -6,10 +6,12 @@ use codex_core::ThreadManager;
 use codex_core::TurnStartOptions;
 use codex_extension_api::AsyncNotificationSupport;
 use codex_extension_api::ConfigContributor;
+use codex_extension_api::ContextContributor;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PromptFragment;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -24,6 +26,7 @@ use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::TurnAbortInput;
+use codex_extension_api::TurnContextContributionInput;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
@@ -610,6 +613,20 @@ where
     }
 }
 
+impl<C> ContextContributor for GoalExtension<C>
+where
+    C: Send + Sync + 'static,
+{
+    fn contribute_turn_context<'a>(
+        &'a self,
+        input: TurnContextContributionInput<'a>,
+    ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
+        Box::pin(async move {
+            crate::steering::waiting_capability_fragments(input.waiting_capabilities)
+        })
+    }
+}
+
 impl<C> TurnInputContributor for GoalExtension<C>
 where
     C: Send + Sync + 'static,
@@ -747,6 +764,7 @@ pub fn install_with_backend_and_clock<C>(
     registry.token_usage_contributor(extension.clone());
     registry.tool_lifecycle_contributor(extension.clone());
     registry.turn_input_contributor(extension.clone());
+    registry.prompt_contributor(extension.clone());
     registry.tool_contributor(extension);
 }
 
