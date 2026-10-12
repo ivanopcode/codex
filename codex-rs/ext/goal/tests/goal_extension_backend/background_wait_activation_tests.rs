@@ -32,6 +32,7 @@ async fn background_wait_enabled_with_support(
         |_| GoalExtensionConfig {
             enabled: true,
             max_goal_token_budget: None,
+            continuation_pacing: false,
         },
     );
     let registry = builder.build();

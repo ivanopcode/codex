@@ -61,6 +61,8 @@ use crate::tool::GoalToolExecutor;
 pub struct GoalExtensionConfig {
     pub enabled: bool,
     pub max_goal_token_budget: Option<i64>,
+    /// Spaces consecutive automatic goal continuations on quiet threads.
+    pub continuation_pacing: bool,
 }
 
 #[derive(Clone)]
@@ -118,6 +120,7 @@ where
         Box::pin(async move {
             let config = (self.goal_config)(input.config);
             let enabled = config.enabled;
+            let continuation_pacing = config.continuation_pacing;
             let tools_visible_for_thread = !matches!(
                 input.session_source,
                 SessionSource::SubAgent(SubAgentSource::Review)
@@ -180,6 +183,11 @@ where
             // before the marker existed) keep automatic continuation ungated.
             if AsyncNotificationSupport::read_from(input.thread_store).is_available() {
                 runtime.background_wait_state().enable();
+            }
+            // Low-activity pacing is enabled by the goal_continuation_pacing
+            // feature flag (on by default).
+            if continuation_pacing {
+                runtime.background_wait_state().enable_pacing();
             }
             self.goal_service.register_runtime(&runtime);
         })
@@ -411,6 +419,16 @@ where
                     |current| current.is_some(),
                 );
             }
+            // The three-empty-continuations blocker above runs first and is
+            // unchanged; pacing records the completed turn's observation after
+            // it, while the per-turn count is still readable.
+            let is_continuation = accounting.is_goal_continuation(turn_id);
+            let had_state_change = accounting.has_observed_state_change(turn_id);
+            runtime.background_wait_state().note_turn_completed(
+                turn_id,
+                is_continuation,
+                had_state_change,
+            );
             accounting.finish_turn(turn_id);
         })
     }

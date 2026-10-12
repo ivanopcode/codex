@@ -39,6 +39,14 @@
 //! [`BackgroundWaitEvaluation::WaitOnReadFailure`] and no automatic
 //! continuation proceeds past the gate. Callers use fake `now` values in
 //! tests, never real sleeps.
+//!
+//! Low-activity pacing (see `continuation_schedule`) shares this state's lock,
+//! invalidation generation, pending-deadline slot, and admission checker.
+//! When the snapshot is empty and pacing is enabled, evaluation paces the
+//! continuation on the P4b-1 observation streak only if the predecessor turn
+//! was itself an automatic goal continuation; the first continuation after a
+//! human turn, a goal set/mutation, or a resume proceeds immediately. Known
+//! pending work still uses this gate's waits instead.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -49,6 +57,9 @@ use codex_extension_api::GoalAdmissionDecision;
 use codex_extension_api::GoalBackgroundWaitAdmission;
 use codex_extension_api::PendingWorkReadError;
 use codex_extension_api::PendingWorkSnapshot;
+
+use crate::continuation_schedule::PacingTicket;
+use crate::continuation_schedule::pacing_delay;
 
 /// Absolute check-in deadlines from the current wait start.
 pub const CHECK_IN_DELAYS: [Duration; 3] = [
@@ -90,6 +101,14 @@ pub enum BackgroundWaitEvaluation {
     ProceedWithTicket {
         expected_revision: u64,
         ticket: CheckInTicket,
+    },
+    /// No pending work and the pacing delay elapsed: proceed once with a
+    /// single-use pacing ticket. The ticket binds goal identity, revision,
+    /// predecessor turn, and generation/streak; admission rechecks all of
+    /// them together with pending-mail state.
+    ProceedWithPacingTicket {
+        expected_revision: u64,
+        ticket: PacingTicket,
     },
     /// Known pending work and no check-in due: wait for events. The caller
     /// drops the goal semaphore and returns without starting. `next_check_in`
@@ -136,6 +155,7 @@ struct AdmissionAttempt {
     expected_revision: u64,
     expected_generation: u64,
     ticket: Option<CheckInTicket>,
+    pacing_ticket: Option<PacingTicket>,
 }
 
 /// Registered scheduled re-entry for one fallback check-in deadline.
@@ -170,6 +190,14 @@ struct WaitState {
     admission_attempt: Option<AdmissionAttempt>,
     pending_deadline: Option<ArmedDeadline>,
     invalidation_hook: Option<InvalidationHook>,
+    pacing_enabled: bool,
+    pacing_streak: u32,
+    pacing_goal_id: Option<String>,
+    pacing_predecessor: Option<String>,
+    pacing_predecessor_is_continuation: bool,
+    pacing_wait_started_at: Option<Duration>,
+    pacing_outstanding: Option<PacingTicket>,
+    pacing_last_consumed_ticket_id: Option<u64>,
 }
 
 impl WaitState {
@@ -187,14 +215,24 @@ impl WaitState {
             admission_attempt: None,
             pending_deadline: None,
             invalidation_hook: None,
+            pacing_enabled: false,
+            pacing_streak: 0,
+            pacing_goal_id: None,
+            pacing_predecessor: None,
+            pacing_predecessor_is_continuation: false,
+            pacing_wait_started_at: None,
+            pacing_outstanding: None,
+            pacing_last_consumed_ticket_id: None,
         }
     }
 
     fn invalidate_tickets(&mut self) {
         self.generation += 1;
         self.outstanding_ticket = None;
+        self.pacing_outstanding = None;
         self.admission_attempt = None;
         self.pending_deadline = None;
+        self.pacing_wait_started_at = None;
         self.fire_invalidation_hook();
     }
 
@@ -289,10 +327,13 @@ impl BackgroundWaitState {
         snapshot: Result<PendingWorkSnapshot, PendingWorkReadError>,
         now: Duration,
     ) -> BackgroundWaitEvaluation {
-        if !state.enabled || status == GoalWaitStatus::InactiveOrBudgetLimited {
-            if status == GoalWaitStatus::InactiveOrBudgetLimited {
-                state.wait_started_at = None;
-            }
+        if status == GoalWaitStatus::InactiveOrBudgetLimited {
+            state.wait_started_at = None;
+            state.pacing_wait_started_at = None;
+            state.pending_deadline = None;
+            return BackgroundWaitEvaluation::ProceedWithoutGate;
+        }
+        if !state.enabled && !state.pacing_enabled {
             state.pending_deadline = None;
             return BackgroundWaitEvaluation::ProceedWithoutGate;
         }
@@ -313,16 +354,30 @@ impl BackgroundWaitState {
         };
         if snapshot.is_empty() {
             state.wait_started_at = None;
+            if !state.pacing_enabled {
+                state.pending_deadline = None;
+                state.admission_attempt = Some(AdmissionAttempt {
+                    goal_id: goal_id.to_string(),
+                    expected_revision: snapshot.revision(),
+                    expected_generation: state.generation,
+                    ticket: None,
+                    pacing_ticket: None,
+                });
+                return BackgroundWaitEvaluation::ProceedNormal {
+                    expected_revision: snapshot.revision(),
+                };
+            }
+            return self.evaluate_pacing_locked(state, goal_id, &snapshot, now);
+        }
+        if !state.enabled {
+            // Background gate inactive but pacing active: pacing only paces
+            // empty snapshots, so pending work proceeds immediately with no
+            // gate. Any pacing wait is superseded (its timer claim will fail
+            // quietly; the next wait replaces the timer).
+            state.pacing_wait_started_at = None;
             state.pending_deadline = None;
-            state.admission_attempt = Some(AdmissionAttempt {
-                goal_id: goal_id.to_string(),
-                expected_revision: snapshot.revision(),
-                expected_generation: state.generation,
-                ticket: None,
-            });
-            return BackgroundWaitEvaluation::ProceedNormal {
-                expected_revision: snapshot.revision(),
-            };
+            state.admission_attempt = None;
+            return BackgroundWaitEvaluation::ProceedWithoutGate;
         }
         if state.check_ins_used >= MAX_CHECK_INS_PER_HUMAN_INPUT {
             let emit_warning = !state.warning_emitted;
@@ -362,8 +417,103 @@ impl BackgroundWaitState {
             expected_revision: snapshot.revision(),
             expected_generation: state.generation,
             ticket: Some(ticket.clone()),
+            pacing_ticket: None,
         });
         BackgroundWaitEvaluation::ProceedWithTicket {
+            expected_revision: snapshot.revision(),
+            ticket,
+        }
+    }
+
+    /// Evaluates low-activity pacing for an empty snapshot at fake-time `now`.
+    ///
+    /// Entry rule: when the predecessor turn was not itself an automatic goal
+    /// continuation (a human turn, a goal set/mutation, or a resume), the
+    /// continuation proceeds immediately via `ProceedNormal` with the revision
+    /// recorded for admission. Otherwise the streak counts consecutive
+    /// completed goal continuations with zero recorded state-changing
+    /// outcomes; any observation resets it to the floor (see
+    /// [`BackgroundWaitState::note_turn_completed`]). The first evaluation of
+    /// a wait episode anchors `pacing_wait_started_at` and returns `Wait`;
+    /// once `now` reaches the anchored deadline, evaluation issues a
+    /// single-use [`PacingTicket`] and returns
+    /// [`BackgroundWaitEvaluation::ProceedWithPacingTicket`]. The deadline
+    /// never recomputes mid-episode, so re-evaluation before the deadline
+    /// re-arms the same registration instead of extending the wait.
+    fn evaluate_pacing_locked(
+        &self,
+        state: &mut WaitState,
+        goal_id: &str,
+        snapshot: &PendingWorkSnapshot,
+        now: Duration,
+    ) -> BackgroundWaitEvaluation {
+        if state.pacing_goal_id.as_deref() != Some(goal_id) {
+            // The first binding keeps the streak and predecessor recorded
+            // before it; only a different goal replacing the bound one
+            // restarts pacing at the floor.
+            if state.pacing_goal_id.is_some() {
+                state.pacing_streak = 0;
+                state.pacing_predecessor = None;
+                state.pacing_predecessor_is_continuation = false;
+                state.pacing_wait_started_at = None;
+                state.pacing_outstanding = None;
+                state.pacing_last_consumed_ticket_id = None;
+            }
+            state.pacing_goal_id = Some(goal_id.to_string());
+        }
+        if !state.pacing_predecessor_is_continuation {
+            // Entry rule (AC1): the first automatic continuation after a
+            // human turn, a goal set/mutation, or a resume has no automatic
+            // predecessor, so it proceeds without a pacing delay. The
+            // revision is still recorded so admission rechecks pending-mail
+            // state before the turn starts.
+            state.pacing_wait_started_at = None;
+            state.pending_deadline = None;
+            state.admission_attempt = Some(AdmissionAttempt {
+                goal_id: goal_id.to_string(),
+                expected_revision: snapshot.revision(),
+                expected_generation: state.generation,
+                ticket: None,
+                pacing_ticket: None,
+            });
+            return BackgroundWaitEvaluation::ProceedNormal {
+                expected_revision: snapshot.revision(),
+            };
+        }
+        let streak_n = state.pacing_streak.saturating_add(1);
+        let delay = pacing_delay(streak_n);
+        let wait_started_at = *state.pacing_wait_started_at.get_or_insert(now);
+        let deadline = wait_started_at.checked_add(delay).unwrap_or(Duration::MAX);
+        if now < deadline {
+            state.pending_deadline = Some(ArmedDeadline {
+                deadline,
+                generation: state.generation,
+            });
+            return BackgroundWaitEvaluation::Wait {
+                next_check_in: Some(deadline),
+                emit_warning: false,
+            };
+        }
+        state.pending_deadline = None;
+        let ticket = PacingTicket::new(
+            state.next_ticket_id,
+            state.generation,
+            goal_id.to_string(),
+            snapshot.revision(),
+            state.pacing_predecessor.clone(),
+            streak_n,
+            now,
+        );
+        state.next_ticket_id += 1;
+        state.pacing_outstanding = Some(ticket.clone());
+        state.admission_attempt = Some(AdmissionAttempt {
+            goal_id: goal_id.to_string(),
+            expected_revision: snapshot.revision(),
+            expected_generation: state.generation,
+            ticket: None,
+            pacing_ticket: Some(ticket.clone()),
+        });
+        BackgroundWaitEvaluation::ProceedWithPacingTicket {
             expected_revision: snapshot.revision(),
             ticket,
         }
@@ -378,7 +528,7 @@ impl BackgroundWaitState {
     /// a turn by itself; the re-entry evaluates and admits normally.
     pub fn claim_due_deadline(&self, deadline: Duration, generation: u64, now: Duration) -> bool {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        if !state.enabled {
+        if !state.enabled && !state.pacing_enabled {
             return false;
         }
         let Some(armed) = state.pending_deadline else {
@@ -413,7 +563,9 @@ impl BackgroundWaitState {
     ///
     /// Consumes the recorded attempt exactly once. Returns `Wait` when no
     /// attempt was recorded, when the generation or revision changed, when a
-    /// ticket is missing, stale, or reused, and on every read failure.
+    /// ticket is missing, stale, or reused, when a pacing ticket's goal,
+    /// predecessor, or pending-mail state changed, and on every read failure.
+    /// A stale ticket never starts a turn.
     pub fn check_admission(
         &self,
         outcome: Result<PendingWorkSnapshot, PendingWorkReadError>,
@@ -429,6 +581,9 @@ impl BackgroundWaitState {
             Ok(snapshot) => snapshot,
             Err(_) => return GoalAdmissionDecision::Wait,
         };
+        if let Some(ticket) = attempt.pacing_ticket.as_ref() {
+            return Self::check_pacing_admission_locked(&mut state, &attempt, ticket, &snapshot);
+        }
         match attempt.ticket {
             Some(ticket) => {
                 let outstanding_matches = state
@@ -464,13 +619,64 @@ impl BackgroundWaitState {
         }
     }
 
+    /// Rechecks one pacing ticket against predecessor and pending-mail state.
+    ///
+    /// Consumes the ticket exactly once. Any mismatch (generation, revision,
+    /// goal identity, predecessor turn, outstanding handle, reuse, or fresh
+    /// pending mail) returns `Wait` without starting a turn.
+    fn check_pacing_admission_locked(
+        state: &mut WaitState,
+        attempt: &AdmissionAttempt,
+        ticket: &PacingTicket,
+        snapshot: &PendingWorkSnapshot,
+    ) -> GoalAdmissionDecision {
+        let outstanding_matches = state
+            .pacing_outstanding
+            .as_ref()
+            .is_some_and(|outstanding| outstanding.ticket_id() == ticket.ticket_id())
+            && ticket.generation() == state.generation
+            && state.pacing_last_consumed_ticket_id != Some(ticket.ticket_id());
+        if !outstanding_matches {
+            return GoalAdmissionDecision::Wait;
+        }
+        if ticket.goal_id() != attempt.goal_id
+            || state.pacing_goal_id.as_deref() != Some(ticket.goal_id())
+        {
+            state.pacing_outstanding = None;
+            return GoalAdmissionDecision::Wait;
+        }
+        if snapshot.revision() != attempt.expected_revision
+            || snapshot.revision() != ticket.expected_revision()
+        {
+            state.pacing_outstanding = None;
+            return GoalAdmissionDecision::Wait;
+        }
+        if state.pacing_predecessor.as_deref() != ticket.predecessor_turn() {
+            state.pacing_outstanding = None;
+            return GoalAdmissionDecision::Wait;
+        }
+        if !snapshot.is_empty() {
+            state.pacing_outstanding = None;
+            return GoalAdmissionDecision::Wait;
+        }
+        state.pacing_last_consumed_ticket_id = Some(ticket.ticket_id());
+        state.pacing_outstanding = None;
+        GoalAdmissionDecision::Allow
+    }
+
     /// Renews the check-in allowance on human input.
+    ///
+    /// Also resets pacing to the floor and clears the automatic-predecessor
+    /// mark: the next automatic continuation after human input proceeds
+    /// without a pacing delay.
     pub fn note_human_input(&self) {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.invalidate_tickets();
         state.check_ins_used = 0;
         state.wait_started_at = None;
         state.warning_emitted = false;
+        state.pacing_streak = 0;
+        state.pacing_predecessor_is_continuation = false;
     }
 
     /// Invalidates tickets on turn start without renewing the allowance.
@@ -493,12 +699,18 @@ impl BackgroundWaitState {
     }
 
     /// Resets the check-in epoch and allowance on goal mutation.
+    ///
+    /// Also resets pacing to the floor for the changed goal, with no
+    /// automatic predecessor: the next continuation proceeds immediately.
     pub fn note_goal_mutation(&self) {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.invalidate_tickets();
         state.check_ins_used = 0;
         state.wait_started_at = None;
         state.warning_emitted = false;
+        state.pacing_streak = 0;
+        state.pacing_predecessor = None;
+        state.pacing_predecessor_is_continuation = false;
     }
 
     /// Clears wait state on goal clear for a fresh next goal.
@@ -510,6 +722,11 @@ impl BackgroundWaitState {
         state.wait_started_at = None;
         state.warning_emitted = false;
         state.last_consumed_ticket_id = None;
+        state.pacing_streak = 0;
+        state.pacing_goal_id = None;
+        state.pacing_predecessor = None;
+        state.pacing_predecessor_is_continuation = false;
+        state.pacing_last_consumed_ticket_id = None;
     }
 
     /// Clears wait state on thread stop.
@@ -521,6 +738,11 @@ impl BackgroundWaitState {
         state.wait_started_at = None;
         state.warning_emitted = false;
         state.last_consumed_ticket_id = None;
+        state.pacing_streak = 0;
+        state.pacing_goal_id = None;
+        state.pacing_predecessor = None;
+        state.pacing_predecessor_is_continuation = false;
+        state.pacing_last_consumed_ticket_id = None;
     }
 
     /// Resets the check-in epoch and allowance on subscription release.
@@ -533,6 +755,10 @@ impl BackgroundWaitState {
     }
 
     /// Discards stale waits on resume; live-generation-only state restarts.
+    ///
+    /// Pacing restarts at the floor: no streak, subscription, or deadline is
+    /// restored, and the first continuation after resume has no automatic
+    /// predecessor, so it proceeds immediately.
     pub fn note_resume(&self) {
         let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         state.invalidate_tickets();
@@ -541,6 +767,87 @@ impl BackgroundWaitState {
         state.wait_started_at = None;
         state.warning_emitted = false;
         state.last_consumed_ticket_id = None;
+        state.pacing_streak = 0;
+        state.pacing_goal_id = None;
+        state.pacing_predecessor = None;
+        state.pacing_predecessor_is_continuation = false;
+        state.pacing_last_consumed_ticket_id = None;
+    }
+
+    /// Records one completed turn for pacing.
+    ///
+    /// Always binds `turn_id` and its continuation kind as the predecessor:
+    /// pacing applies only when the predecessor was itself an automatic goal
+    /// continuation, so the first continuation after a human turn proceeds
+    /// without a delay. When `is_goal_continuation` is true, a turn with zero
+    /// recorded state-changing outcomes grows the low-activity streak by one;
+    /// any observed state change resets it to the floor (the next wait is
+    /// still paced at the floor while the predecessor is automatic). Human
+    /// and other non-continuation turns never touch the streak (human input
+    /// resets it separately via [`BackgroundWaitState::note_human_input`]).
+    ///
+    /// Call after the three-empty-continuations blocker check and before the
+    /// turn's accounting entry is finished, while the observation count is
+    /// still readable.
+    pub fn note_turn_completed(
+        &self,
+        turn_id: &str,
+        is_goal_continuation: bool,
+        had_state_change: bool,
+    ) {
+        let mut state = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        state.pacing_predecessor = Some(turn_id.to_string());
+        state.pacing_predecessor_is_continuation = is_goal_continuation;
+        if !is_goal_continuation {
+            return;
+        }
+        if had_state_change {
+            state.pacing_streak = 0;
+        } else {
+            state.pacing_streak = state.pacing_streak.saturating_add(1);
+        }
+    }
+
+    /// Enables low-activity pacing for subsequent evaluations.
+    pub fn enable_pacing(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pacing_enabled = true;
+    }
+
+    /// Reports whether low-activity pacing engages.
+    pub fn is_pacing_enabled(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pacing_enabled
+    }
+
+    /// Consecutive completed goal continuations with no observed state change.
+    pub fn pacing_streak(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pacing_streak
+    }
+
+    /// Predecessor turn bound by the next pacing ticket, if any completed yet.
+    pub fn pacing_predecessor(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pacing_predecessor
+            .clone()
+    }
+
+    /// Currently outstanding pacing ticket, if one was issued and not consumed.
+    pub fn pacing_outstanding_ticket(&self) -> Option<PacingTicket> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pacing_outstanding
+            .clone()
     }
 
     /// Check-ins consumed in the current human-input epoch.
