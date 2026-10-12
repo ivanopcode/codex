@@ -44,14 +44,8 @@ pub(crate) fn goal_waiting_guidance_sections(
 ) -> Vec<WorldStateSectionContribution> {
     let previously_recorded =
         previous_world_state.is_some_and(|state| state.contains_key(WORLD_STATE_ID));
-    if !goal_active && !previously_recorded {
-        return Vec::new();
-    }
-    vec![if goal_active {
-        active_section(capabilities)
-    } else {
-        inactive_section()
-    }]
+    let _ = (goal_active, previously_recorded);
+    vec![active_section(capabilities)]
 }
 
 /// Comparison snapshot for one sampling step: the five capability flags plus
