@@ -243,12 +243,27 @@ fn is_directly_visible(specs: &[ToolSpec], name: &ToolName) -> bool {
 /// `wait_agent` never match. The registered native tool must then be
 /// directly visible or deferred-but-discovered, like every other flag.
 fn find_native_wait_agent(
-    router: &ToolRouter,
+    _router: &ToolRouter,
     specs: &[ToolSpec],
-    discovered: &HashSet<ToolName>,
+    _discovered: &HashSet<ToolName>,
 ) -> Option<ToolName> {
-    let name = router.native_wait_tool()?;
-    is_callable(router, specs, discovered, &name).then_some(name)
+    specs.iter().find_map(|spec| match spec {
+        ToolSpec::Function(tool) => {
+            (tool.name == WAIT_AGENT_TOOL_NAME).then(|| ToolName::plain(tool.name.clone()))
+        }
+        ToolSpec::Freeform(tool) => {
+            (tool.name == WAIT_AGENT_TOOL_NAME).then(|| ToolName::plain(tool.name.clone()))
+        }
+        ToolSpec::Namespace(namespace) => namespace
+            .tools
+            .iter()
+            .any(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(tool) => tool.name == WAIT_AGENT_TOOL_NAME,
+                ResponsesApiNamespaceTool::Custom(tool) => tool.name == WAIT_AGENT_TOOL_NAME,
+            })
+            .then(|| ToolName::namespaced(namespace.name.clone(), WAIT_AGENT_TOOL_NAME)),
+        ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => None,
+    })
 }
 
 /// Whether the callable `exec_command` schema exposes the `notify_on_exit`
