@@ -233,7 +233,6 @@ impl WaitState {
         self.admission_attempt = None;
         self.pending_deadline = None;
         self.pacing_wait_started_at = None;
-        self.fire_invalidation_hook();
     }
 
     fn fire_invalidation_hook(&self) {
