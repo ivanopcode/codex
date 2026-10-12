@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::ExtensionData;
 use crate::ExtensionMetrics;
+use crate::WaitingCapabilities;
 
 /// Host state available while an extension contributes one sampling step's World State.
 pub struct WorldStateContributionInput<'a> {
@@ -23,6 +24,10 @@ pub struct WorldStateContributionInput<'a> {
     pub executor_capability_discovery: Option<&'a ExecutorCapabilityDiscoverySnapshot>,
     /// Metrics bound to the captured model for this sampling step.
     pub extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
+    /// Waiting tools callable in this sampling step, derived from the final
+    /// captured router: the same snapshot as this step's
+    /// `TurnContextContributionInput`.
+    pub waiting_capabilities: &'a WaitingCapabilities,
     pub session_store: &'a ExtensionData,
     pub thread_store: &'a ExtensionData,
     pub turn_store: &'a ExtensionData,
