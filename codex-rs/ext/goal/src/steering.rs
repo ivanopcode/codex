@@ -113,10 +113,11 @@ pub(crate) fn waiting_capability_fragments(
     if capabilities.native_mail_wait {
         sentences.push(WAITING_NATIVE_MAIL_WAIT.to_string());
     }
-    vec![PromptFragment::developer_capability(
+    let fragment = PromptFragment::developer_capability(
         sentences.join("\n"),
         ContentItemKind("goal.waiting_capabilities".to_string()),
-    )]
+    );
+    vec![fragment.clone(), fragment]
 }
 
 /// Renders the snapshot's actual native wait tool name, bounded by
