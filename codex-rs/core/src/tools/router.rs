@@ -214,6 +214,27 @@ impl ToolRouter {
         self.registry.mcp_namespaces()
     }
 
+    /// The finalized exposure for `name`, if the tool survived exclusions.
+    pub(crate) fn tool_exposure(
+        &self,
+        name: &ToolName,
+    ) -> Option<crate::tools::registry::ToolExposure> {
+        self.registry.tool_exposure(name)
+    }
+
+    /// The registered native agent wait tool, if any.
+    ///
+    /// Scans the finalized registry for a V1 or V2 native wait runtime and
+    /// returns its actual [`ToolName`] (including any configured V2
+    /// namespace). Dynamic, MCP, and extension tools named `wait_agent` never
+    /// match: only native runtimes report provenance.
+    pub(crate) fn native_wait_tool(&self) -> Option<ToolName> {
+        self.registry
+            .entries()
+            .find(|tool| tool.runtime.is_native_wait_tool())
+            .map(|tool| tool.runtime.tool_name())
+    }
+
     #[cfg(test)]
     pub(crate) fn registered_tool_names_for_test(&self) -> Vec<ToolName> {
         self.registry.tool_names_for_test()
@@ -224,7 +245,7 @@ impl ToolRouter {
         &self,
         name: &ToolName,
     ) -> Option<crate::tools::registry::ToolExposure> {
-        self.registry.tool_exposure(name)
+        self.tool_exposure(name)
     }
 
     pub(crate) fn create_diff_consumer(
