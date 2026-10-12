@@ -115,6 +115,7 @@ fn install(
         |c: &Config| GoalExtensionConfig {
             enabled: c.features.enabled(Feature::Goals),
             max_goal_token_budget: c.max_goal_token_budget,
+            continuation_pacing: false,
         },
         clock,
     );
@@ -441,6 +442,10 @@ async fn background_wait_inactive_on_unavailable_host_auto_continues() -> Result
     assert!(
         !runtime.background_wait_state().is_enabled(),
         "headless host should leave the policy inactive"
+    );
+    assert!(
+        !runtime.background_wait_state().is_pacing_enabled(),
+        "pacing stays off in this suite via the fixture config"
     );
     assert!(
         test.codex.test_arm_exec_receipt_for_background_wait().await,

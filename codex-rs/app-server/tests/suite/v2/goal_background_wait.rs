@@ -169,23 +169,36 @@ struct GoalHarness {
 
 /// Starts a server with auto env, a thread, and a goal. Setting the goal
 /// triggers the first automatic turn; callers await its notifications.
+///
+/// `pacing_disabled` keeps the pre-pacing immediate-continuation timing, and
+/// is set only by the callers that need back-to-back automatic continuations;
+/// the wake tests run with pacing enabled so the event-wake-while-pacing
+/// interaction stays observable. Users can opt out with `[features]
+/// goal_continuation_pacing = false`.
 async fn start_goal_harness(
     scripts: Vec<String>,
     extra_server_args: &[&str],
+    pacing_disabled: bool,
 ) -> Result<GoalHarness> {
     let server = responses::start_mock_server().await;
     let mock = responses::mount_sse_sequence(&server, scripts).await;
     let home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    // Low-activity pacing postdates these background-wait tests; only the
+    // callers that need back-to-back automatic continuations disable it.
+    let mock_config = MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
-        .enable_feature(Feature::Goals)
-        .write(home.path())?;
-    let mut app = TestAppServer::builder()
+        .enable_feature(Feature::Goals);
+    let mock_config = if pacing_disabled {
+        mock_config.disable_feature(Feature::GoalContinuationPacing)
+    } else {
+        mock_config
+    };
+    mock_config.write(home.path())?;
+    let builder = TestAppServer::builder()
         .with_codex_home(home.path())
         .without_managed_config()
-        .with_args(extra_server_args)
-        .build_initialized()
-        .await?;
+        .with_args(extra_server_args);
+    let mut app = builder.build_initialized().await?;
     let request = app
         .send_thread_start_request_with_auto_env(ThreadStartParams::default())
         .await?;
@@ -291,7 +304,7 @@ async fn notified_exec_exit_wakes_gated_goal_with_receipt_fragment() -> Result<(
             "background work finished; goal complete",
         ),
     ];
-    let mut harness = start_goal_harness(scripts, &[]).await?;
+    let mut harness = start_goal_harness(scripts, &[], /*pacing_disabled*/ false).await?;
 
     let first_started = await_turn_started(&mut harness.app).await?;
     let first_completed = await_turn_completed(&mut harness.app).await?;
@@ -418,7 +431,7 @@ async fn user_burst_during_background_wait_admitted_without_loss_or_duplication(
             "background work finished; goal complete",
         ),
     ];
-    let mut harness = start_goal_harness(scripts, &[]).await?;
+    let mut harness = start_goal_harness(scripts, &[], /*pacing_disabled*/ false).await?;
 
     await_turn_started(&mut harness.app).await?;
     let first_completed = await_turn_completed(&mut harness.app).await?;
@@ -523,7 +536,9 @@ async fn unopted_server_process_does_not_gate_goal_continuation() -> Result<()> 
             "server work finished; goal complete",
         ),
     ];
-    let mut harness = start_goal_harness(scripts, &[]).await?;
+    // The unopted continuation must arrive promptly (30 s notification
+    // timeouts); a paced 60 s wait would time out, so keep the switch here.
+    let mut harness = start_goal_harness(scripts, &[], /*pacing_disabled*/ true).await?;
 
     await_turn_started(&mut harness.app).await?;
     let first_completed = await_turn_completed(&mut harness.app).await?;
@@ -590,7 +605,14 @@ async fn headless_host_refuses_notify_on_exit_and_promises_no_wake() -> Result<(
         update_goal_complete_sse("headless-r3", "headless-complete"),
         final_message_sse("headless-r4", "headless-m4", "goal complete"),
     ];
-    let mut harness = start_goal_harness(scripts, &["--session-source", "exec"]).await?;
+    // The headless continuation must arrive promptly (30 s notification
+    // timeouts); a paced 60 s wait would time out, so keep the switch here.
+    let mut harness = start_goal_harness(
+        scripts,
+        &["--session-source", "exec"],
+        /*pacing_disabled*/ true,
+    )
+    .await?;
 
     await_turn_started(&mut harness.app).await?;
     let first_completed = await_turn_completed(&mut harness.app).await?;

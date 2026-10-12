@@ -3472,8 +3472,13 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
     ])
     .await;
     let codex_home = TempDir::new()?;
+    // This root/parent lineage test drives two consecutive automatic goal
+    // continuations back to back; pacing postdates it and would insert a
+    // 60s delay before the second. Disable pacing so the lineage waits
+    // stay immediate.
     mock_responses_config(server.uri())
         .enable_feature(Feature::Goals)
+        .disable_feature(Feature::GoalContinuationPacing)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

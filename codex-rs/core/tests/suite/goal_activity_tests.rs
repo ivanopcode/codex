@@ -84,6 +84,7 @@ fn install(
         |c: &Config| GoalExtensionConfig {
             enabled: c.features.enabled(Feature::Goals),
             max_goal_token_budget: c.max_goal_token_budget,
+            continuation_pacing: false,
         },
     );
 }

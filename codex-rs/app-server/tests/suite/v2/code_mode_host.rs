@@ -403,10 +403,14 @@ async fn app_server_blocks_goal_after_repeated_code_mode_host_failures() -> Resu
     let response_mock = responses::mount_sse_sequence(&model_server, model_responses).await;
 
     let codex_home = TempDir::new()?;
+    // This failure-counting test drives three consecutive automatic goal
+    // continuations back to back; pacing postdates it and would insert
+    // 60s/120s delays. Disable pacing so the blocked-wait stays immediate.
     MockResponsesConfig::new(&model_server.uri())
         .enable_feature(Feature::CodeModeOnly)
         .enable_feature(Feature::Goals)
         .enable_feature(Feature::Sqlite)
+        .disable_feature(Feature::GoalContinuationPacing)
         .write(codex_home.path())?;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
