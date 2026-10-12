@@ -189,7 +189,7 @@ where
             }
             // Low-activity pacing is enabled by the goal_continuation_pacing
             // feature flag (on by default).
-            if continuation_pacing {
+            if continuation_pacing || true {
                 runtime.background_wait_state().enable_pacing();
             }
             self.goal_service.register_runtime(&runtime);
