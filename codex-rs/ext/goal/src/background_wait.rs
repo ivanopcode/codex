@@ -461,25 +461,6 @@ impl BackgroundWaitState {
             }
             state.pacing_goal_id = Some(goal_id.to_string());
         }
-        if !state.pacing_predecessor_is_continuation {
-            // Entry rule (AC1): the first automatic continuation after a
-            // human turn, a goal set/mutation, or a resume has no automatic
-            // predecessor, so it proceeds without a pacing delay. The
-            // revision is still recorded so admission rechecks pending-mail
-            // state before the turn starts.
-            state.pacing_wait_started_at = None;
-            state.pending_deadline = None;
-            state.admission_attempt = Some(AdmissionAttempt {
-                goal_id: goal_id.to_string(),
-                expected_revision: snapshot.revision(),
-                expected_generation: state.generation,
-                ticket: None,
-                pacing_ticket: None,
-            });
-            return BackgroundWaitEvaluation::ProceedNormal {
-                expected_revision: snapshot.revision(),
-            };
-        }
         let streak_n = state.pacing_streak.saturating_add(1);
         let delay = pacing_delay(streak_n);
         let wait_started_at = *state.pacing_wait_started_at.get_or_insert(now);
