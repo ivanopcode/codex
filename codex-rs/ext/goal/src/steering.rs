@@ -98,9 +98,7 @@ pub(crate) fn waiting_capability_fragments(
     } else {
         sentences.push(WAITING_NO_EXEC_NOTIFY.to_string());
     }
-    if capabilities.sleep {
-        sentences.push(WAITING_SLEEP.to_string());
-    }
+    sentences.push(WAITING_SLEEP.to_string());
     if capabilities.stdin {
         sentences.push(WAITING_STDIN.to_string());
     }
