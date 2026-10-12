@@ -65,7 +65,6 @@ pub fn pacing_delay(low_streak_n: u32) -> Duration {
     PACING_BASE_DELAY
         .checked_mul(multiplier)
         .unwrap_or(PACING_CAP_DELAY)
-        .min(PACING_CAP_DELAY)
 }
 
 /// Single-use pacing ticket for one delayed automatic continuation.
