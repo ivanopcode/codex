@@ -14,6 +14,7 @@ mod runtime;
 mod spec;
 mod steering;
 mod tool;
+mod waiting_world_state;
 
 pub use api::GoalObjectiveUpdate;
 pub use api::GoalService;
