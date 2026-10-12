@@ -103,7 +103,7 @@ fn inactive_section() -> WorldStateSectionContribution {
             PreviousWorldStateSection::Known(Value::Bool(false)) => false,
             // A recorded active snapshot means stale guidance may still be
             // model-visible: correct it exactly once.
-            PreviousWorldStateSection::Known(_) => true,
+            PreviousWorldStateSection::Known(_) => false,
             // No recorded entry (defensive: the contributor skips the section
             // in this case): nothing to correct.
             PreviousWorldStateSection::Absent => false,
