@@ -79,7 +79,7 @@ fn active_section(capabilities: &WaitingCapabilities) -> WorldStateSectionContri
         .unwrap_or_default();
     WorldStateSectionContribution::new(WORLD_STATE_ID, snapshot.clone(), move |previous| {
         let changed = match previous {
-            PreviousWorldStateSection::Known(previous) => previous != &snapshot,
+            PreviousWorldStateSection::Known(_) => true,
             // Activation, or a re-render after compaction evicted the
             // fragment while the snapshot survived (core maps that to Absent
             // via the retained matcher below).
