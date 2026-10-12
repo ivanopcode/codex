@@ -131,14 +131,7 @@ fn render_native_wait_tool_name(name: &ToolName) -> String {
         Some(namespace) if !name.is_default_namespace() => format!("{namespace}.{tool}"),
         _ => tool.clone(),
     };
-    if display.chars().count() <= MAX_NATIVE_WAIT_TOOL_NAME_CHARS {
-        return display;
-    }
-    let truncated: String = display
-        .chars()
-        .take(MAX_NATIVE_WAIT_TOOL_NAME_CHARS)
-        .collect();
-    format!("{truncated}…")
+    display
 }
 
 fn goal_context_input_item(prompt: String) -> ResponseItem {
