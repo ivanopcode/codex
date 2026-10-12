@@ -355,6 +355,11 @@ impl GoalAccountingState {
         self.inner().automatic_goal_turn_id = Some(turn_id);
     }
 
+    /// Reports whether `turn_id` was started as an automatic goal continuation.
+    pub(crate) fn is_goal_continuation(&self, turn_id: &str) -> bool {
+        self.inner().automatic_goal_turn_id.as_deref() == Some(turn_id)
+    }
+
     pub(crate) fn reset_empty_responses(&self) {
         let mut inner = self.inner();
         inner.automatic_goal_turn_id = None;
