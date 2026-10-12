@@ -59,9 +59,12 @@ async fn empty_goal_continuations_block_after_three_without_activity(
     }
     let server = create_mock_responses_server_sequence(scripts).await;
     let codex_home = TempDir::new()?;
+    // Low-activity pacing postdates this blocker test; disable it so the
+    // empty-continuation timing stays immediate.
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
         .enable_feature(Feature::Goals)
+        .disable_feature(Feature::GoalContinuationPacing)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

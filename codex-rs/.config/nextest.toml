@@ -20,6 +20,11 @@ slow-timeout = { period = "1m", terminate-after = 3 }
 filter = 'package(codex-cli) & binary(app_server_daemon) & test(packaged_daemon_)'
 slow-timeout = { period = "1m", terminate-after = 2 }
 
+[[profile.default.overrides]]
+# This end-to-end case waits real goal pacing delays (an immediate first poll, then the 60 s n=2 delay) through a live app-server.
+filter = 'package(codex-app-server) & test(=suite::v2::goal_continuation_pacing::goal_pacing_two_polls_first_immediate_second_60s)'
+slow-timeout = { period = "1m", terminate-after = 2 }
+
 [profile.default.junit]
 path = "junit.xml"
 
