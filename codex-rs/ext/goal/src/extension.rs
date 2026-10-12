@@ -11,8 +11,8 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::GoalActivity;
 use codex_extension_api::PlanCommitInput;
-use codex_extension_api::PromptFragment;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -27,13 +27,14 @@ use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::TurnAbortInput;
-use codex_extension_api::TurnContextContributionInput;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
 use codex_extension_api::TurnLifecycleContributor;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_extension_api::WorldStateContributionInput;
+use codex_extension_api::WorldStateSectionContribution;
 use codex_otel::MetricsClient;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
@@ -650,12 +651,23 @@ impl<C> ContextContributor for GoalExtension<C>
 where
     C: Send + Sync + 'static,
 {
-    fn contribute_turn_context<'a>(
+    fn contribute_world_state<'a>(
         &'a self,
-        input: TurnContextContributionInput<'a>,
-    ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
+        input: WorldStateContributionInput<'a>,
+    ) -> ExtensionFuture<'a, Vec<WorldStateSectionContribution>> {
         Box::pin(async move {
-            crate::steering::waiting_capability_fragments(input.waiting_capabilities)
+            // Goal-active threads only: the marker is present for Active and
+            // BudgetLimited goals and removed for every other status, so
+            // threads that never had a goal (or whose goal is paused,
+            // blocked, usage-limited, or complete) contribute no section and
+            // see no model-visible change. There is deliberately no core
+            // fragment for goal-less threads.
+            let goal_active = input.thread_store.get::<GoalActivity>().is_some();
+            crate::waiting_world_state::goal_waiting_guidance_sections(
+                goal_active,
+                input.waiting_capabilities,
+                input.previous_world_state,
+            )
         })
     }
 }
