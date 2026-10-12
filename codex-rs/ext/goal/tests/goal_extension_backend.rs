@@ -170,6 +170,7 @@ async fn installed_goal_tools_apply_maximum_token_budget() -> anyhow::Result<()>
     harness.thread_store.insert(GoalExtensionConfig {
         enabled: true,
         max_goal_token_budget: Some(100),
+        continuation_pacing: false,
     });
     let tools = harness.tools();
     let create_tool = tool_by_name(&tools, "create_goal");
@@ -1691,6 +1692,7 @@ async fn installed_tools_with_start(
         |_| GoalExtensionConfig {
             enabled: true,
             max_goal_token_budget: None,
+            continuation_pacing: false,
         },
     );
     let registry = builder.build();
@@ -1748,6 +1750,7 @@ impl GoalExtensionHarness {
             |enabled| GoalExtensionConfig {
                 enabled: *enabled,
                 max_goal_token_budget: None,
+                continuation_pacing: false,
             },
         );
         let registry = Arc::new(builder.build());
@@ -2144,3 +2147,5 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
 mod background_wait_activation;
 #[path = "goal_extension_backend/goal_activity_tests.rs"]
 mod goal_activity;
+#[path = "goal_extension_backend/state_change_observation_tests.rs"]
+mod state_change_observation;

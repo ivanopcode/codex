@@ -11,6 +11,7 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::PlanCommitInput;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
@@ -63,6 +64,8 @@ use crate::tool::GoalToolExecutor;
 pub struct GoalExtensionConfig {
     pub enabled: bool,
     pub max_goal_token_budget: Option<i64>,
+    /// Spaces consecutive automatic goal continuations on quiet threads.
+    pub continuation_pacing: bool,
 }
 
 #[derive(Clone)]
@@ -120,6 +123,7 @@ where
         Box::pin(async move {
             let config = (self.goal_config)(input.config);
             let enabled = config.enabled;
+            let continuation_pacing = config.continuation_pacing;
             let tools_visible_for_thread = !matches!(
                 input.session_source,
                 SessionSource::SubAgent(SubAgentSource::Review)
@@ -182,6 +186,11 @@ where
             // before the marker existed) keep automatic continuation ungated.
             if AsyncNotificationSupport::read_from(input.thread_store).is_available() {
                 runtime.background_wait_state().enable();
+            }
+            // Low-activity pacing is enabled by the goal_continuation_pacing
+            // feature flag (on by default).
+            if continuation_pacing {
+                runtime.background_wait_state().enable_pacing();
             }
             self.goal_service.register_runtime(&runtime);
         })
@@ -341,9 +350,9 @@ where
             if let Some(runtime) = goal_runtime_handle(thread_store)
                 && runtime.is_enabled()
             {
-                runtime
-                    .accounting_state()
-                    .record_item(turn_store.level_id(), item);
+                let accounting = runtime.accounting_state();
+                accounting.record_item(turn_store.level_id(), item);
+                accounting.record_state_change_for_item(turn_store.level_id(), item);
             }
         })
     }
@@ -413,6 +422,16 @@ where
                     |current| current.is_some(),
                 );
             }
+            // The three-empty-continuations blocker above runs first and is
+            // unchanged; pacing records the completed turn's observation after
+            // it, while the per-turn count is still readable.
+            let is_continuation = accounting.is_goal_continuation(turn_id);
+            let had_state_change = accounting.has_observed_state_change(turn_id);
+            runtime.background_wait_state().note_turn_completed(
+                turn_id,
+                is_continuation,
+                had_state_change,
+            );
             accounting.finish_turn(turn_id);
         })
     }
@@ -515,6 +534,20 @@ impl<C> ToolLifecycleContributor for GoalExtension<C>
 where
     C: Send + Sync + 'static,
 {
+    fn on_plan_committed<'a>(&'a self, input: PlanCommitInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            let Some(runtime) = goal_runtime_handle(input.thread_store) else {
+                return;
+            };
+            if !runtime.is_enabled() {
+                return;
+            }
+            runtime
+                .accounting_state()
+                .record_plan_transition(input.turn_id, &input.plan.plan);
+        })
+    }
+
     fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
