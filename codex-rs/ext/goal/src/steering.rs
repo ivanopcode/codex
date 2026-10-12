@@ -1,7 +1,9 @@
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
+use codex_extension_api::ContentItemKind;
 use codex_extension_api::PromptFragment;
+use codex_extension_api::ToolName;
 use codex_extension_api::WaitingCapabilities;
 use codex_prompts::without_update_plan_instructions;
 use codex_protocol::models::ResponseItem;
@@ -59,15 +61,84 @@ pub(crate) fn continuation_steering_item(
     goal_context_input_item(continuation_prompt(goal, update_plan_enabled))
 }
 
+/// Byte-exact waiting-guidance sentences from final-plan §9.
+///
+/// Rust selects these static strings from the sampling-step
+/// [`WaitingCapabilities`] snapshot; no new template syntax is involved. The
+/// §9 "none of the positive flags" no-wait/end-turn paragraph is NOT emitted
+/// here: plan §10 defers it until P4b pacing is active.
+pub(crate) const WAITING_EXEC_NOTIFY: &str = "exec_command can acknowledge notify_on_exit subscriptions. For finite background work, request a notification; after the tool acknowledges it, do independent work and then end the turn. Its completion will be delivered by the runtime. Use write_stdin only for needed intermediate output or interaction. Use exec_notification to read retained terminal output or release a mistaken subscription without terminating the process.";
+pub(crate) const WAITING_NO_EXEC_NOTIFY: &str = "This session cannot promise an exec completion wake. A yielded exec session by itself is not a reason to expect automatic resumption.";
+pub(crate) const WAITING_SLEEP: &str = "clock.sleep is available as a direct tool. Use a substantial input-interruptible wait when a notification subscription is unavailable. Do not place clock.sleep inside a code-mode exec cell.";
+pub(crate) const WAITING_STDIN: &str = "An empty write_stdin with a long yield_time_ms can wait for one known live exec session. Read again early only when intermediate output is needed to decide the next action.";
+pub(crate) const WAITING_NATIVE_WAIT: &str = "The native agent wait tool is available for Codex-managed children. Pass multiple child identifiers where that tool supports them to wait for whichever changes first. It cannot observe arbitrary shell or remote jobs.";
+pub(crate) const WAITING_NATIVE_MAIL_WAIT: &str = "When this active goal yields with owned native child work still running, the runtime can wait for child mailbox results. Do not repeatedly inspect child logs merely to keep the goal alive.";
+
+/// Hard cap on the rendered native wait tool name, in characters.
+///
+/// The name is the only variable datum in the fragment; everything else is
+/// static §9 text. Truncation appends `…` so a capped name is recognizable.
+pub(crate) const MAX_NATIVE_WAIT_TOOL_NAME_CHARS: usize = 128;
+
 /// Goal-specific waiting guidance for this sampling step.
 ///
-/// The continuation-guidance leaf renders developer capabilities from
-/// `capabilities` here. The snapshot leaf only threads the snapshot through
-/// and emits nothing, so no prompt text changes in this leaf.
+/// Renders exactly one [`PromptFragment`] in the developer-capabilities slot
+/// from this step's [`WaitingCapabilities`] snapshot, in fixed §9 order:
+/// exactly one of the exec sentences, then the sleep, stdin, native wait
+/// (with the snapshot's actual tool name), and native mail wait sentences
+/// for each set flag. The caller (goal's `ContextContributor`) emits nothing
+/// unless the thread's goal is active, so this renderer always returns one
+/// fragment.
 pub(crate) fn waiting_capability_fragments(
-    _capabilities: &WaitingCapabilities,
+    capabilities: &WaitingCapabilities,
 ) -> Vec<PromptFragment> {
-    Vec::new()
+    let mut sentences = Vec::with_capacity(5);
+    if capabilities.exec_notify {
+        sentences.push(WAITING_EXEC_NOTIFY.to_string());
+    } else {
+        sentences.push(WAITING_NO_EXEC_NOTIFY.to_string());
+    }
+    if capabilities.sleep {
+        sentences.push(WAITING_SLEEP.to_string());
+    }
+    if capabilities.stdin {
+        sentences.push(WAITING_STDIN.to_string());
+    }
+    if let Some(native_wait) = capabilities.native_wait.as_ref() {
+        sentences.push(format!(
+            "{WAITING_NATIVE_WAIT} (Tool name: {}.)",
+            render_native_wait_tool_name(native_wait)
+        ));
+    }
+    if capabilities.native_mail_wait {
+        sentences.push(WAITING_NATIVE_MAIL_WAIT.to_string());
+    }
+    vec![PromptFragment::developer_capability(
+        sentences.join("\n"),
+        ContentItemKind("goal.waiting_capabilities".to_string()),
+    )]
+}
+
+/// Renders the snapshot's actual native wait tool name, bounded by
+/// [`MAX_NATIVE_WAIT_TOOL_NAME_CHARS`].
+///
+/// Namespaced tools use the dotted `namespace.name` form; default-namespace
+/// tools render as the bare name. Overlong names truncate at a character
+/// boundary with a trailing `…`.
+fn render_native_wait_tool_name(name: &ToolName) -> String {
+    let tool = &name.name;
+    let display = match name.namespace.as_deref() {
+        Some(namespace) if !name.is_default_namespace() => format!("{namespace}.{tool}"),
+        _ => tool.clone(),
+    };
+    if display.chars().count() <= MAX_NATIVE_WAIT_TOOL_NAME_CHARS {
+        return display;
+    }
+    let truncated: String = display
+        .chars()
+        .take(MAX_NATIVE_WAIT_TOOL_NAME_CHARS)
+        .collect();
+    format!("{truncated}…")
 }
 
 fn goal_context_input_item(prompt: String) -> ResponseItem {

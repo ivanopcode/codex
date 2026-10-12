@@ -11,6 +11,7 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::GoalActivity;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
@@ -622,6 +623,15 @@ where
         input: TurnContextContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<PromptFragment>> {
         Box::pin(async move {
+            // Goal-active threads only: the marker is present for Active and
+            // BudgetLimited goals and removed for every other status, so
+            // threads with no goal (or a paused, blocked, usage-limited, or
+            // complete goal) contribute nothing and see no model-visible
+            // change. There is deliberately no core fragment for goal-less
+            // threads.
+            if input.thread_store.get::<GoalActivity>().is_none() {
+                return Vec::new();
+            }
             crate::steering::waiting_capability_fragments(input.waiting_capabilities)
         })
     }
