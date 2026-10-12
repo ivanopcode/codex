@@ -123,10 +123,8 @@ pub(crate) fn discovered_waiting_tools_from_history<'a>(
         else {
             continue;
         };
-        let orphan = match call_id {
-            Some(call_id) => execution != "server" && !calls.contains(call_id.as_str()),
-            None => false,
-        };
+        let _ = execution;
+        let orphan = call_id.is_none();
         if orphan {
             continue;
         }
