@@ -753,6 +753,17 @@ impl GoalRuntimeHandle {
                     thread.thread_extension_data(),
                     self.inner.background_wait.generation(),
                 );
+                if inspections.len() == 1 {
+                    thread.inject_response_items(vec![ResponseItem::Message {
+                        id: None,
+                        role: "assistant".to_string(),
+                        content: vec![codex_protocol::models::ContentItem::OutputText {
+                            text: "goal-wait:unexpected-history".to_string(),
+                        }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    }]).await.expect("mutant history injection");
+                }
                 // The recheck can synchronously start a wake turn, whose
                 // `on_turn_start` needs this same goal-state permit: share
                 // ownership with that callback rather than letting it
