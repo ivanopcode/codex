@@ -881,6 +881,12 @@ impl InterAgentCommunication {
     }
 
     pub fn to_model_input_item(&self) -> ResponseItem {
+        // The envelope is model-visible and counted in context accounting,
+        // while the stored `author`/`recipient` identities stay full: legacy
+        // over-cap paths can reach here through resume, so render truncated
+        // display copies (byte-identical for short paths).
+        let author = self.author.truncated_for_display();
+        let recipient = self.recipient.truncated_for_display();
         let content = match &self.encrypted_content {
             Some(encrypted_content) => {
                 let message_type = if self.trigger_turn {
@@ -891,8 +897,7 @@ impl InterAgentCommunication {
                 vec![
                     AgentMessageInputContent::InputText {
                         text: format!(
-                            "Message Type: {message_type}\nTask name: {}\nSender: {}\nPayload:\n",
-                            self.recipient, self.author
+                            "Message Type: {message_type}\nTask name: {recipient}\nSender: {author}\nPayload:\n"
                         ),
                     },
                     AgentMessageInputContent::EncryptedContent {
@@ -906,8 +911,8 @@ impl InterAgentCommunication {
         };
         ResponseItem::AgentMessage {
             id: self.id.clone(),
-            author: self.author.to_string(),
-            recipient: self.recipient.to_string(),
+            author,
+            recipient,
             content,
             internal_chat_message_metadata_passthrough: self
                 .internal_chat_message_metadata_passthrough
@@ -4764,6 +4769,75 @@ mod tests {
                     AgentMessageInputContent::InputText {
                         text: "Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\n"
                             .to_string(),
+                    },
+                    AgentMessageInputContent::EncryptedContent {
+                        encrypted_content: "encrypted payload".to_string(),
+                    },
+                ],
+                internal_chat_message_metadata_passthrough: None,
+            }
+        );
+    }
+
+    #[test]
+    fn agent_message_envelope_truncates_legacy_paths_for_display() {
+        // Legacy identities (valid pre-cap grammar, over the new-spawn cap)
+        // keep their full routing identity in storage, but the model-visible
+        // envelope renders truncated display copies.
+        // Past the display cap (and the new-spawn segment cap), so the
+        // envelope truncates. ASCII keeps the expected slices boundary-safe.
+        let legacy_author = format!("/root/{}", "a".repeat(300));
+        let legacy_recipient = format!("/root/{}", "b".repeat(300));
+        assert!(legacy_author.len() > AgentPath::MODEL_DISPLAY_MAX_BYTES);
+        let expected_author = format!(
+            "{}…[truncated]",
+            &legacy_author[..AgentPath::MODEL_DISPLAY_MAX_BYTES]
+        );
+        let expected_recipient = format!(
+            "{}…[truncated]",
+            &legacy_recipient[..AgentPath::MODEL_DISPLAY_MAX_BYTES]
+        );
+        let communication = InterAgentCommunication::new(
+            AgentPath::try_from(legacy_author.as_str()).expect("legacy author parses"),
+            AgentPath::try_from(legacy_recipient.as_str()).expect("legacy recipient parses"),
+            Vec::new(),
+            "notice body".to_string(),
+            /*trigger_turn*/ false,
+        );
+        assert_eq!(
+            communication.to_model_input_item(),
+            ResponseItem::AgentMessage {
+                id: None,
+                author: expected_author.clone(),
+                recipient: expected_recipient.clone(),
+                content: vec![AgentMessageInputContent::InputText {
+                    text: "notice body".to_string(),
+                }],
+                internal_chat_message_metadata_passthrough: None,
+            }
+        );
+        // The stored routing identities are unchanged.
+        assert_eq!(communication.author.as_str(), legacy_author);
+        assert_eq!(communication.recipient.as_str(), legacy_recipient);
+
+        let encrypted = InterAgentCommunication::new_encrypted(
+            AgentPath::try_from(legacy_author.as_str()).expect("legacy author parses"),
+            AgentPath::try_from(legacy_recipient.as_str()).expect("legacy recipient parses"),
+            Vec::new(),
+            "encrypted payload".to_string(),
+            /*trigger_turn*/ false,
+        );
+        assert_eq!(
+            encrypted.to_model_input_item(),
+            ResponseItem::AgentMessage {
+                id: None,
+                author: expected_author.clone(),
+                recipient: expected_recipient.clone(),
+                content: vec![
+                    AgentMessageInputContent::InputText {
+                        text: format!(
+                            "Message Type: MESSAGE\nTask name: {expected_recipient}\nSender: {expected_author}\nPayload:\n"
+                        ),
                     },
                     AgentMessageInputContent::EncryptedContent {
                         encrypted_content: "encrypted payload".to_string(),
