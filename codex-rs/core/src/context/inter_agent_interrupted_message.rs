@@ -57,6 +57,7 @@ impl InterAgentInterruptedMessage {
 /// [`INTERRUPTED_PATH_MAX_BYTES`] bytes with a marker when over the cap.
 /// Paths at or under the cap render byte-identical.
 fn truncate_path(path: &AgentPath) -> String {
+    const INTERRUPTED_PATH_MAX_BYTES: usize = 256;
     let rendered = path.as_str();
     if rendered.len() <= INTERRUPTED_PATH_MAX_BYTES {
         return rendered.to_string();
