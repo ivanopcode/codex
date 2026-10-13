@@ -86,7 +86,7 @@ impl ContextualUserFragment for InterAgentInterruptedMessage {
 
     fn body(&self) -> String {
         let task_name = truncate_path(&self.task_name);
-        let sender = truncate_path(&self.sender);
+        let sender = self.sender.as_str();
         let body = format!("{BODY_PREFIX}{task_name}{BODY_MIDDLE}{sender}{BODY_SUFFIX}");
         debug_assert!(body.len() <= INTERRUPTED_MESSAGE_MAX_BYTES);
         body
