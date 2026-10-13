@@ -501,6 +501,94 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
         .expect("fork_turns=all should apply agent_type overrides");
 }
 
+#[tokio::test]
+async fn spawn_agent_v2_rejects_overlong_task_name() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    set_agent_control(&mut session, manager.agent_control());
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let mut turn = turn;
+    turn.config = Arc::new(config);
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
+
+    let overlong = "a".repeat(AgentPath::MAX_SEGMENT_BYTES + 1);
+    let overlong_len = overlong.len();
+    let threads_before = manager.list_thread_ids().await;
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "do slow work",
+                "task_name": overlong,
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .err()
+        .expect("over-long task_name should be refused");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(format!(
+            "agent_name must be at most {} bytes, got {overlong_len}",
+            AgentPath::MAX_SEGMENT_BYTES
+        ))
+    );
+    // Refusal happens before any spawn: no child thread exists.
+    assert_eq!(manager.list_thread_ids().await, threads_before);
+}
+
+#[tokio::test]
+async fn spawn_agent_v2_accepts_task_name_at_cap() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    set_agent_control(&mut session, manager.agent_control());
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let mut turn = turn;
+    turn.config = Arc::new(config);
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
+
+    let at_cap = "a".repeat(AgentPath::MAX_SEGMENT_BYTES);
+    let threads_before = manager.list_thread_ids().await;
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "do slow work",
+                "task_name": at_cap,
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("task_name at cap should spawn");
+    assert_eq!(
+        manager.list_thread_ids().await.len(),
+        threads_before.len() + 1
+    );
+}
+
 fn service_tier_test_catalog() -> codex_protocol::openai_models::ModelsResponse {
     let mut catalog = codex_models_manager::bundled_models_response().expect("bundled models");
     let mut model = catalog
