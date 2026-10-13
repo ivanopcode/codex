@@ -374,7 +374,8 @@ impl BackgroundWaitState {
                 return BackgroundWaitEvaluation::WaitOnReadFailure { error };
             }
         };
-        if snapshot.is_empty() && !native_pending {
+        let _ = native_pending;
+        if snapshot.is_empty() {
             state.wait_started_at = None;
             if !state.pacing_enabled {
                 state.pending_deadline = None;
