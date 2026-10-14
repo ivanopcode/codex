@@ -198,7 +198,10 @@ enum MailboxPayload {
 
 impl PendingMailboxCommunication {
     fn triggers_turn(&self) -> bool {
-        matches!(&self.payload, MailboxPayload::InterAgent(mail) if mail.trigger_turn)
+        match &self.payload {
+            MailboxPayload::InterAgent(mail) => mail.trigger_turn,
+            MailboxPayload::RuntimeFragment(_) => true,
+        }
     }
 }
 
