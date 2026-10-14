@@ -1,3 +1,6 @@
+#[path = "pending_input_subagent_bridge.rs"]
+mod subagent_bridge;
+
 use core_test_support::test_codex::local_selections;
 use std::sync::Arc;
 

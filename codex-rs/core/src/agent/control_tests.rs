@@ -1,3 +1,6 @@
+#[path = "control_bridge_tests.rs"]
+mod bridge;
+
 use super::*;
 use crate::CodexThread;
 use crate::StateDbHandle;
@@ -417,8 +420,12 @@ fn history_contains_assistant_inter_agent_communication<'a>(
 async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> bool {
     let wait = async {
         loop {
-            let history = parent_thread.session.clone_history().await;
-            if has_subagent_notification(history.raw_items()) {
+            if parent_thread
+                .session
+                .input_queue
+                .has_pending_mailbox_items()
+                .await
+            {
                 return true;
             }
             sleep(Duration::from_millis(25)).await;
@@ -4103,6 +4110,10 @@ async fn spawn_child_completion_notifies_parent_history() {
         .expect("child shutdown should submit");
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
+    // Keep the regression's original name; delivery now waits in the mailbox.
+    assert!(!has_subagent_notification(
+        parent_thread.session.clone_history().await.raw_items()
+    ));
 }
 
 #[tokio::test]
@@ -4330,15 +4341,25 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
 
     let history = parent_thread.session.clone_history().await;
+    assert!(!has_subagent_notification(history.raw_items()));
+    let (items, _) = parent_thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    let history: Vec<ResponseItem> = items
+        .into_iter()
+        .map(|item| match item {
+            crate::session::TurnInput::ResponseItem(envelope) => envelope.item,
+            item => panic!("expected runtime fragment, got {item:?}"),
+        })
+        .collect();
     assert_eq!(
-        history_contains_text(
-            history.raw_items(),
-            &format!("\"agent_path\":\"{child_thread_id}\"")
-        ),
+        history_contains_text(&history, &format!("\"agent_path\":\"{child_thread_id}\"")),
         true
     );
     assert_eq!(
-        history_contains_text(history.raw_items(), "\"status\":\"not_found\""),
+        history_contains_text(&history, "\"status\":\"not_found\""),
         true
     );
 }

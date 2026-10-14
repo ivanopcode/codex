@@ -184,9 +184,22 @@ pub(crate) struct InputQueue {
 }
 
 struct PendingMailboxCommunication {
-    communication: InterAgentCommunication,
+    payload: MailboxPayload,
     start_options: TurnStartOptions,
     _diagnostics_guard: GaugeGuard,
+}
+
+/// Runtime fragments share the ordinary mailbox's delivery phase and ordering,
+/// but carry neither agent lineage nor permission to start an idle turn.
+enum MailboxPayload {
+    InterAgent(Box<InterAgentCommunication>),
+    RuntimeFragment(Box<ResponseItemEnvelope>),
+}
+
+impl PendingMailboxCommunication {
+    fn triggers_turn(&self) -> bool {
+        matches!(&self.payload, MailboxPayload::InterAgent(mail) if mail.trigger_turn)
+    }
 }
 
 impl InputQueue {
@@ -303,8 +316,21 @@ impl InputQueue {
             .lock()
             .await
             .push_back(PendingMailboxCommunication {
-                communication,
+                payload: MailboxPayload::InterAgent(Box::new(communication)),
                 start_options,
+                _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
+            });
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+    }
+
+    /// Queues native runtime context without an inter-agent event or wake authority.
+    pub(crate) async fn enqueue_runtime_fragment(&self, fragment: ResponseItemEnvelope) {
+        self.mailbox_pending_mails
+            .lock()
+            .await
+            .push_back(PendingMailboxCommunication {
+                payload: MailboxPayload::RuntimeFragment(Box::new(fragment)),
+                start_options: TurnStartOptions::default(),
                 _diagnostics_guard: PENDING_MAILBOX_MESSAGES.track(),
             });
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
@@ -435,15 +461,15 @@ impl InputQueue {
             .lock()
             .await
             .iter()
-            .any(|mail| mail.communication.trigger_turn)
+            .any(PendingMailboxCommunication::triggers_turn)
         {
             return true;
         }
         self.runtime_notifications.lock().await.has_trigger()
     }
 
-    /// Drains inter-agent mail, removing entries. Runtime notifications are
-    /// leased separately via [`Self::lease_runtime_notifications`] and stay
+    /// Drains inter-agent mail and queue-only runtime fragments, removing entries.
+    /// Exec completion notifications are leased separately via [`Self::lease_runtime_notifications`] and stay
     /// until acknowledged or cancelled.
     pub(crate) async fn drain_mailbox_input_items(&self) -> (Vec<TurnInput>, TurnStartOptions) {
         let pending_mails = self
@@ -456,18 +482,18 @@ impl InputQueue {
         let mut start_options = pending_mails
             .iter()
             .rev()
-            .find(|mail| mail.communication.trigger_turn)
+            .find(|mail| mail.triggers_turn())
             .map(|mail| mail.start_options.clone())
             .unwrap_or_default();
         start_options.parent_turn_id = pending_mails
             .iter()
-            .filter(|mail| mail.communication.trigger_turn)
+            .filter(|mail| mail.triggers_turn())
             .map(|mail| mail.start_options.parent_turn_id.as_deref())
             .reduce(|expected, candidate| expected.filter(|id| candidate == Some(*id)))
             .and_then(|id| id.filter(|id| !id.trim().is_empty()).map(str::to_string));
         start_options.root_turn_id = pending_mails
             .iter()
-            .find(|mail| mail.communication.trigger_turn)
+            .find(|mail| mail.triggers_turn())
             .and_then(|mail| {
                 mail.start_options
                     .parent_turn_id
@@ -479,7 +505,12 @@ impl InputQueue {
             .map(str::to_string);
         let items = pending_mails
             .into_iter()
-            .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
+            .map(|mail| match mail.payload {
+                MailboxPayload::InterAgent(communication) => {
+                    TurnInput::InterAgentCommunication(*communication)
+                }
+                MailboxPayload::RuntimeFragment(fragment) => TurnInput::ResponseItem(*fragment),
+            })
             .collect();
         (items, start_options)
     }
@@ -643,7 +674,7 @@ impl InputQueue {
 
     /// Reports whether input drainable by the current turn is pending.
     ///
-    /// In-turn follow-up only: runtime notifications are idle-wake work leased
+    /// In-turn follow-up only: exec notifications are idle-wake work leased
     /// exclusively by `maybe_start_turn_for_pending_work`. They must not count
     /// here, or a turn that leaves a capped remainder behind (or observes a
     /// mid-turn arrival) would keep re-sampling without consuming it: the
