@@ -115,7 +115,7 @@ impl LocalAgentControl {
             parent_agent_path,
             Vec::new(),
             message,
-            /*trigger_turn*/ false,
+            /*trigger_turn*/ true,
         );
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
