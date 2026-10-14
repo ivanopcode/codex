@@ -1225,11 +1225,7 @@ impl CodexThread {
 
     /// Queues runtime context; only existing mailbox wake policy may start a turn.
     pub(crate) async fn queue_runtime_fragment(&self, fragment: impl ContextualUserFragment) {
-        self.session
-            .input_queue
-            .enqueue_runtime_fragment(ContextualUserFragment::into(fragment).into())
-            .await;
-        self.session.maybe_start_turn_for_pending_work().await;
+        self.session.inject_no_new_turn(vec![ContextualUserFragment::into(fragment)], /*current_turn_context*/ None).await;
     }
 
     /// Records an explicit user goal mutation without scheduling a model response.
