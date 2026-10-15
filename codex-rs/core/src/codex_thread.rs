@@ -1225,6 +1225,9 @@ impl CodexThread {
 
     /// Queues runtime context; only existing mailbox wake policy may start a turn.
     pub(crate) async fn queue_runtime_fragment(&self, fragment: impl ContextualUserFragment) {
+        if self.session.active_turn.lock().await.as_ref().is_some_and(|turn| turn.task.is_some()) {
+            return;
+        }
         self.session
             .input_queue
             .enqueue_runtime_fragment(ContextualUserFragment::into(fragment).into())
