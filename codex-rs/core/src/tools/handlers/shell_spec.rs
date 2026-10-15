@@ -144,7 +144,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
             "session_id".to_string(),
-            JsonSchema::number(Some(
+            JsonSchema::integer(Some(
                 "Identifier of the running unified exec session.".to_string(),
             )),
         ),
