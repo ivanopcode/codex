@@ -16,7 +16,7 @@ impl SubagentNotification {
         let errored = matches!(status, AgentStatus::Errored(_));
         let status = match status {
             AgentStatus::Completed(Some(text)) | AgentStatus::Errored(text) => {
-                let mut bounded: String = text.chars().take(384).collect();
+                let mut bounded: String = text.chars().take(if errored { usize::MAX } else { 384 }).collect();
                 if bounded.len() < text.len() {
                     bounded.push_str("\n[truncated]");
                 }
