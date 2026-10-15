@@ -445,9 +445,6 @@ impl LocalAgentControl {
                     while let Some(Ok(snapshot)) = updates.next().await {
                         if snapshot.status() != previous_status.as_ref()
                             && matches!(snapshot.status(), Some(AgentStatus::Interrupted))
-                            && control
-                                .parent_holds_goal_wait_marker(parent_thread_id)
-                                .await
                             && let Ok(state) = control.runtime.upgrade()
                             && let Ok(parent) = state.get_thread(parent_thread_id).await
                         {
