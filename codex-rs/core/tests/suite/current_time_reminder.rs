@@ -1197,7 +1197,7 @@ async fn sleep_tool_uses_configured_time_provider() -> Result<()> {
         .expect("sleep tool should be exposed");
     assert_eq!(
         sleep_tool["parameters"]["properties"]["duration_ms"]["type"],
-        "integer"
+        "number"
     );
     assert!(
         requests[1]

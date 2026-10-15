@@ -13,6 +13,111 @@ fn has_parameter(tool: &ToolSpec, parameter_name: &str) -> bool {
         .is_some()
 }
 
+// Wire-contract pins against upstream 0462dcc: reserved tool schema drift can
+// reject an entire model request. Testing static values is intentional here;
+// changing these literals requires a deliberate decision, not a snapshot refresh.
+// Pin the base host; capable-host notify_on_exit remains a separate contract.
+#[test]
+fn exec_command_reserved_parameters_match_upstream_wire_contract() {
+    let tool = serde_json::to_value(create_exec_command_tool(CommandToolOptions {
+        allow_login_shell: true,
+        exec_permission_approvals_enabled: false,
+        async_notifications_available: false,
+    }))
+    .expect("exec_command should serialize");
+    let yield_description = if cfg!(windows) {
+        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
+    } else {
+        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+    };
+    let parameters = &tool["parameters"];
+    assert_eq!(
+        parameters,
+        &serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string", "description": "Shell command to execute."},
+                "workdir": {
+                    "type": "string",
+                    "description": "Working directory for the command. Defaults to the turn cwd."
+                },
+                "shell": {
+                    "type": "string",
+                    "description": "Shell binary to launch. Defaults to the user's default shell."
+                },
+                "tty": {
+                    "type": "boolean",
+                    "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+                },
+                "yield_time_ms": {"type": "number", "description": yield_description},
+                "max_output_tokens": {
+                    "type": "number",
+                    "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                },
+                "login": {
+                    "type": "boolean",
+                    "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+                },
+                "sandbox_permissions": {
+                    "type": "string",
+                    "enum": ["use_default", "require_escalated"],
+                    "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution."
+                },
+                "justification": {
+                    "type": "string",
+                    "description": "User-facing approval question for `require_escalated`; omit otherwise."
+                },
+                "prefix_rule": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"]."
+                }
+            },
+            "required": ["cmd"],
+            "additionalProperties": false
+        })
+    );
+    for parameter in ["yield_time_ms", "max_output_tokens"] {
+        assert_ne!(parameters["properties"][parameter]["type"], "integer");
+    }
+}
+
+#[test]
+fn write_stdin_reserved_parameters_match_upstream_wire_contract() {
+    let tool =
+        serde_json::to_value(create_write_stdin_tool()).expect("write_stdin should serialize");
+    let parameters = &tool["parameters"];
+    assert_eq!(
+        parameters,
+        &serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "number",
+                    "description": "Identifier of the running unified exec session."
+                },
+                "chars": {
+                    "type": "string",
+                    "description": "Bytes to write to stdin. Defaults to empty, which polls without writing."
+                },
+                "yield_time_ms": {
+                    "type": "number",
+                    "description": "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default."
+                },
+                "max_output_tokens": {
+                    "type": "number",
+                    "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        })
+    );
+    for parameter in ["session_id", "yield_time_ms", "max_output_tokens"] {
+        assert_ne!(parameters["properties"][parameter]["type"], "integer");
+    }
+}
+
 #[test]
 fn exec_command_tool_matches_expected_spec() {
     let tool = create_exec_command_tool(CommandToolOptions {
@@ -63,11 +168,11 @@ fn exec_command_tool_matches_expected_spec() {
         ),
         (
             "yield_time_ms".to_string(),
-            JsonSchema::integer(Some(yield_time_ms_description.to_string())),
+            JsonSchema::number(Some(yield_time_ms_description.to_string())),
         ),
         (
             "max_output_tokens".to_string(),
-            JsonSchema::integer(Some(
+            JsonSchema::number(Some(
                     "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.".to_string(),
                 )),
         ),
@@ -123,7 +228,7 @@ fn write_stdin_tool_matches_expected_spec() {
     let properties = BTreeMap::from([
         (
             "session_id".to_string(),
-            JsonSchema::integer(Some(
+            JsonSchema::number(Some(
                 "Identifier of the running unified exec session.".to_string(),
             )),
         ),
@@ -135,13 +240,13 @@ fn write_stdin_tool_matches_expected_spec() {
         ),
         (
             "yield_time_ms".to_string(),
-            JsonSchema::integer(Some(
+            JsonSchema::number(Some(
                 "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
             )),
         ),
         (
             "max_output_tokens".to_string(),
-            JsonSchema::integer(Some(
+            JsonSchema::number(Some(
                 "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.".to_string(),
             )),
         ),

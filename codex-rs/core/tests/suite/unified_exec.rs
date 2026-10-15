@@ -2086,7 +2086,7 @@ async fn one_shot_exec_command_accepts_integral_decimal_timeout_and_rejects_frac
         .expect("one-shot exec_command should be exposed");
     assert_eq!(
         exec_tool["parameters"]["properties"]["timeout_ms"]["type"],
-        "integer"
+        "number"
     );
     assert!(
         exec_tool["parameters"]["properties"]
