@@ -1,0 +1,73 @@
+# relux-build: hosted macOS arm64 release build of the fork's CLI for local side-by-side trials (fork-only).
+name: relux-build
+run-name: relux-build ${{ inputs.sha || github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact commit to build (full 40-hex id, reachable from a pushed ref)
+        required: true
+  push:
+    branches: ["relux/build/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relux-build-${{ inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 150
+    env:
+      RUN_SHA: ${{ inputs.sha || github.sha }}
+      CARGO_INCREMENTAL: "0"
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.RUN_SHA }}
+
+      - name: Verify the checked-out commit
+        env:
+          WANT_SHA: ${{ env.RUN_SHA }}
+        run: |
+          [[ "$WANT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-hex commit id, got '$WANT_SHA'"; exit 1; }
+          HEAD_SHA="$(git rev-parse HEAD)"
+          [ "$HEAD_SHA" = "$WANT_SHA" ] || { echo "::error::checked out $HEAD_SHA, expected $WANT_SHA"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Cargo build
+        run: |
+          STABLE_GIT_COMMIT="$RUN_SHA"
+          export STABLE_GIT_COMMIT
+          cargo build --target aarch64-apple-darwin --release --bin codex --bin codex-code-mode-host
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/codex-relux"
+          mkdir -p "$out/bin"
+          cp target/aarch64-apple-darwin/release/codex target/aarch64-apple-darwin/release/codex-code-mode-host "$out/bin/"
+          echo "$RUN_SHA" > "$out/SOURCE_SHA"
+          (cd "$out/bin" && shasum -a 256 codex codex-code-mode-host) > "$out/SHA256SUMS"
+          "$out/bin/codex" --version | tee "$out/VERSION"
+          ls -la "$out/bin"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-relux-aarch64-apple-darwin-${{ env.RUN_SHA }}
+          path: ${{ runner.temp }}/codex-relux
+          retention-days: 14
