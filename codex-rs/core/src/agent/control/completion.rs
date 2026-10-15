@@ -148,7 +148,7 @@ impl LocalAgentControl {
     ///
     /// Missing manager or parent is quiet (`false`): interrupted notices are
     /// best effort for registered waits only.
-    async fn parent_holds_goal_wait_marker(&self, parent_thread_id: ThreadId) -> bool {
+    pub(super) async fn parent_holds_goal_wait_marker(&self, parent_thread_id: ThreadId) -> bool {
         let Ok(manager) = self.runtime.upgrade() else {
             return false;
         };
