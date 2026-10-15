@@ -6,7 +6,7 @@
 //! (`runtime.rs` Wait arm, `continue_if_idle` -> Core `start_turn_if_idle`)
 //! re-entry starts real turns marked automatic at 30/60/120 minutes, then the
 //! production warning fires once. No manual per-check-in
-//! evaluate/claim/admit calls; no real sleeps.
+//! evaluate/claim/admit calls. Await timer registration before advancing time.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -76,6 +76,7 @@ impl CheckInClock for PausedClock {
 #[derive(Default)]
 struct RecordingWarningSink {
     warnings: Mutex<Vec<String>>,
+    warning: tokio::sync::Notify,
 }
 
 impl RecordingWarningSink {
@@ -95,6 +96,7 @@ impl ExtensionEventSink for RecordingWarningSink {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(warning.message);
+        self.warning.notify_one();
     }
 }
 
@@ -255,64 +257,57 @@ async fn scheduled_checkins_fire_through_production_runtime_under_paused_time() 
         .expect("goal creation should succeed");
     outcome.apply_runtime_effects(&service).await;
 
-    tokio::time::pause();
-    test.codex
-        .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
-        .await;
     assert_eq!(mock.requests().len(), 0);
     assert_eq!(runtime.background_wait_state().check_ins_used(), 0);
     assert!(runtime.test_marked_goal_continuations().is_empty());
 
-    tokio::time::advance(Duration::from_secs(30 * 60)).await;
-    tokio::time::resume();
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    assert_eq!(runtime.background_wait_state().check_ins_used(), 1);
-    assert_eq!(runtime.test_marked_goal_continuations().len(), 1);
-
-    tokio::time::pause();
-    test.codex
-        .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+    let wait_started = runtime
+        .background_wait_state()
+        .wait_started_at()
+        .expect("armed wait");
+    for (check_in, minutes) in [(1u8, 30), (2, 60), (3, 120)] {
+        // TurnComplete precedes active-turn cleanup and the idle callback.
+        // Wait for that callback to register the next real deadline before
+        // advancing time; an early advance can race teardown and admission.
+        let deadline = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some((deadline, _)) = runtime.background_wait_state().armed_deadline() {
+                    break deadline;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle callback must arm the next check-in");
+        assert_eq!(deadline, wait_started + Duration::from_secs(minutes * 60));
+        tokio::time::pause();
+        tokio::time::advance(deadline.saturating_sub(clock.now())).await;
+        tokio::time::resume();
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
         .await;
-    tokio::time::advance(Duration::from_secs(30 * 60)).await;
-    tokio::time::resume();
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    assert_eq!(runtime.background_wait_state().check_ins_used(), 2);
-    assert_eq!(runtime.test_marked_goal_continuations().len(), 2);
-
-    tokio::time::pause();
-    test.codex
-        .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
-        .await;
-    tokio::time::advance(Duration::from_secs(60 * 60)).await;
-    tokio::time::resume();
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    assert_eq!(runtime.background_wait_state().check_ins_used(), 3);
-    assert_eq!(runtime.test_marked_goal_continuations().len(), 3);
-
-    for _ in 0..1000 {
-        if sink.warnings().len() == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
+        assert_eq!(runtime.background_wait_state().check_ins_used(), check_in);
+        assert_eq!(
+            runtime.test_marked_goal_continuations().len(),
+            usize::from(check_in)
+        );
     }
+    // The third TurnComplete also precedes the idle warning. Wait for its
+    // actual emission, not an arbitrary number of executor yields.
+    tokio::time::timeout(Duration::from_secs(10), sink.warning.notified())
+        .await
+        .expect("idle callback must emit the stopped-check-ins warning");
     assert_eq!(sink.warnings(), vec![CHECK_INS_STOPPED_WARNING.to_string()]);
     assert!(runtime.background_wait_state().warning_emitted());
 
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(60 * 60)).await;
     tokio::time::resume();
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
+    test.codex
+        .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+        .await;
+    assert_eq!(runtime.background_wait_state().armed_deadline(), None);
     assert_eq!(runtime.background_wait_state().check_ins_used(), 3);
     assert_eq!(runtime.test_marked_goal_continuations().len(), 3);
     assert_eq!(sink.warnings().len(), 1);
