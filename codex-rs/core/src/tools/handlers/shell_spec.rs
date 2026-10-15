@@ -145,7 +145,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         (
             "session_id".to_string(),
             JsonSchema::number(Some(
-                "Identifier of the running unified exec session.".to_string(),
+                "Identifier of the active unified exec session.".to_string(),
             )),
         ),
         (
