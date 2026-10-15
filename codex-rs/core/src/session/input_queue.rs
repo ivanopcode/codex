@@ -467,7 +467,7 @@ impl InputQueue {
         for mail in pending.iter_mut() {
             if let MailboxPayload::RuntimeFragment(fragment) = &mail.payload {
                 fragments.push((**fragment).clone());
-                mail.payload = MailboxPayload::RecordedRuntimeFragment;
+                mail.payload = MailboxPayload::RuntimeFragment(fragment.clone());
             }
         }
         fragments
