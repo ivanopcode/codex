@@ -1,3 +1,6 @@
+#[path = "control_bridge_tests.rs"]
+mod bridge;
+
 use super::*;
 use crate::CodexThread;
 use crate::StateDbHandle;

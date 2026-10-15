@@ -441,7 +441,24 @@ impl LocalAgentControl {
             let status = match control.subscribe_status(child_thread_id).await {
                 Ok(mut updates) => {
                     let mut final_status = None;
+                    let mut previous_status = None;
                     while let Some(Ok(snapshot)) = updates.next().await {
+                        if snapshot.status() != previous_status.as_ref()
+                            && matches!(snapshot.status(), Some(AgentStatus::Interrupted))
+                            && control
+                                .parent_holds_goal_wait_marker(parent_thread_id)
+                                .await
+                            && let Ok(state) = control.runtime.upgrade()
+                            && let Ok(parent) = state.get_thread(parent_thread_id).await
+                        {
+                            parent
+                                .queue_runtime_fragment(SubagentNotification::new(
+                                    child_reference.as_str(),
+                                    AgentStatus::Interrupted,
+                                ))
+                                .await;
+                        }
+                        previous_status = snapshot.status().cloned();
                         if let Some(status) = snapshot.status()
                             && is_final(status)
                         {
@@ -511,10 +528,7 @@ impl LocalAgentControl {
                 return;
             };
             parent_thread
-                .inject_fragment_without_turn(SubagentNotification::new(
-                    child_reference.as_str(),
-                    status,
-                ))
+                .queue_runtime_fragment(SubagentNotification::new(child_reference.as_str(), status))
                 .await;
         });
     }
