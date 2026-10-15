@@ -460,7 +460,7 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
     assert!(properties.contains_key("timeout_ms"));
     assert_eq!(
         properties["timeout_ms"].schema_type,
-        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Integer))
+        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Number))
     );
     assert!(description.contains(
         "Does not return the content; returns either a summary of which agents have updates (if any)"
@@ -481,7 +481,7 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
 }
 
 #[test]
-fn wait_agent_tool_v1_timeout_schema_is_integer() {
+fn wait_agent_tool_v1_timeout_schema_is_number() {
     let parameters = wait_agent_tool_parameters_v1(WaitAgentTimeoutOptions::default());
     let timeout_schema = parameters
         .properties
@@ -490,8 +490,59 @@ fn wait_agent_tool_v1_timeout_schema_is_integer() {
         .expect("wait_agent v1 should expose timeout_ms");
     assert_eq!(
         timeout_schema.schema_type,
-        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Integer))
+        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Number))
     );
+}
+
+// Wire-contract pins against upstream 0462dcc: the server rejects reserved tool
+// schema drift. Testing static values is intentional here; changes require a
+// deliberate wire-contract decision, not a snapshot refresh.
+#[test]
+fn wait_agent_v1_reserved_parameters_match_upstream_wire_contract() {
+    let tool = serde_json::to_value(create_wait_agent_tool_v1(WaitAgentTimeoutOptions::default()))
+        .expect("wait_agent v1 should serialize");
+    let parameters = &tool["tools"][0]["parameters"];
+    assert_eq!(
+        parameters,
+        &json!({
+            "type": "object",
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first."
+                },
+                "timeout_ms": {
+                    "type": "number",
+                    "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000. Prefer longer waits (minutes) to avoid busy polling."
+                }
+            },
+            "required": ["targets"],
+            "additionalProperties": false
+        })
+    );
+    assert_ne!(parameters["properties"]["timeout_ms"]["type"], "integer");
+}
+
+#[test]
+fn wait_agent_v2_reserved_parameters_match_upstream_wire_contract() {
+    let tool = serde_json::to_value(create_wait_agent_tool_v2(WaitAgentTimeoutOptions::default()))
+        .expect("wait_agent v2 should serialize");
+    let parameters = &tool["parameters"];
+    assert_eq!(
+        parameters,
+        &json!({
+            "type": "object",
+            "properties": {
+                "timeout_ms": {
+                    "type": "number",
+                    "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+                }
+            },
+            "additionalProperties": false
+        })
+    );
+    assert_ne!(parameters["properties"]["timeout_ms"]["type"], "integer");
 }
 
 #[test]
