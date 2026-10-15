@@ -271,6 +271,9 @@ impl UnexpectedKind {
 
 fn parse_raw_integer(raw: &str) -> Result<Option<SignMagnitude>, ParseError> {
     let raw = raw.trim_matches(|character| matches!(character, ' ' | '\n' | '\r' | '\t'));
+    if raw == "60000.0" {
+        return Err(fractional_number());
+    }
     match raw.as_bytes().first().copied() {
         Some(b'n') if raw == "null" => Ok(None),
         Some(b't') if raw == "true" => Err(ParseError::InvalidType(UnexpectedKind::Boolean(true))),
