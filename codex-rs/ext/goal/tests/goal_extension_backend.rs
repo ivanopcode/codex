@@ -1,6 +1,9 @@
 #![recursion_limit = "256"]
 #![allow(clippy::expect_used)]
 
+#[path = "goal_extension_backend/reserved_tool_schema_tests.rs"]
+mod reserved_tool_schema_tests;
+
 use codex_utils_absolute_path::test_support::PathExt;
 use std::sync::Arc;
 use std::sync::Mutex;

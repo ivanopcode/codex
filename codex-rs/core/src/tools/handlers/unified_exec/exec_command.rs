@@ -537,7 +537,7 @@ fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
     properties.remove("yield_time_ms");
     properties.insert(
         "timeout_ms".to_string(),
-        JsonSchema::integer(Some(
+        JsonSchema::number(Some(
             "Maximum command runtime. Defaults to 10000 ms.".to_string(),
         )),
     );
@@ -609,3 +609,7 @@ fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool)
         &[("tty", if tty { "true" } else { "false" })],
     );
 }
+
+#[cfg(test)]
+#[path = "exec_command_tests.rs"]
+mod tests;
