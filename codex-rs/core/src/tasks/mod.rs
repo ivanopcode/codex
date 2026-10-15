@@ -1,5 +1,6 @@
 mod compact;
 mod lifecycle;
+mod mailbox;
 mod regular;
 mod review;
 mod user_shell;
@@ -552,10 +553,13 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_pending_mailbox_items().await
-            || (!self.input_queue.has_trigger_turn_mailbox_items().await
-                && !self.has_outstanding_durable_sleep())
+        if !self.input_queue.has_pending_mailbox_items().await {
+            return;
+        }
+        if !self.input_queue.has_trigger_turn_mailbox_items().await
+            && !self.has_outstanding_durable_sleep()
         {
+            self.record_idle_runtime_fragments().await;
             return;
         }
 

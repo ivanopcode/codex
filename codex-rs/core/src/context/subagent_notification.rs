@@ -11,8 +11,31 @@ pub(crate) struct SubagentNotification {
 
 impl SubagentNotification {
     pub(crate) fn new(agent_reference: impl Into<String>, status: AgentStatus) -> Self {
+        // JSON escapes each scalar to at most six bytes (non-ASCII scalars
+        // remain UTF-8). These limits keep the entire fragment below 3 KiB.
+        let errored = matches!(status, AgentStatus::Errored(_));
+        let status = match status {
+            AgentStatus::Completed(Some(text)) | AgentStatus::Errored(text) => {
+                let mut bounded: String = text.chars().take(384).collect();
+                if bounded.len() < text.len() {
+                    bounded.push_str("\n[truncated]");
+                }
+                // Preserve the terminal classification while bounding its payload.
+                if errored {
+                    AgentStatus::Errored(bounded)
+                } else {
+                    AgentStatus::Completed(Some(bounded))
+                }
+            }
+            status @ (AgentStatus::PendingInit
+            | AgentStatus::Running
+            | AgentStatus::Completed(None)
+            | AgentStatus::Interrupted
+            | AgentStatus::Shutdown
+            | AgentStatus::NotFound) => status,
+        };
         Self {
-            agent_reference: agent_reference.into(),
+            agent_reference: agent_reference.into().chars().take(64).collect(),
             status,
         }
     }
