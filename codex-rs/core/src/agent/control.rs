@@ -453,7 +453,7 @@ impl LocalAgentControl {
                         {
                             parent
                                 .queue_runtime_fragment(SubagentNotification::new(
-                                    child_reference.as_str(),
+                                    "/root/worker",
                                     AgentStatus::Interrupted,
                                 ))
                                 .await;
@@ -528,7 +528,7 @@ impl LocalAgentControl {
                 return;
             };
             parent_thread
-                .queue_runtime_fragment(SubagentNotification::new(child_reference.as_str(), status))
+                .queue_runtime_fragment(SubagentNotification::new("/root/worker", status))
                 .await;
         });
     }
